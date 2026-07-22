@@ -56,7 +56,9 @@ RUN mkdir -p /opt/orca \
     && curl -L "$URL" -o /opt/orca/orca-linux.AppImage \
     && chmod +x /opt/orca/orca-linux.AppImage \
     && cd /opt/orca && ./orca-linux.AppImage --appimage-extract \
-    && rm /opt/orca/orca-linux.AppImage
+    && rm /opt/orca/orca-linux.AppImage \
+    && chmod -R a+rX /opt/orca/squashfs-root \
+    && chmod a+rx /opt/orca/squashfs-root/AppRun
 
 # Non-root runtime user. State lives in /home/orca/.config — mount a persistent
 # volume there in Coolify so pairing + agent auth survive redeployments.

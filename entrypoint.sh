@@ -1,16 +1,16 @@
 #!/bin/bash
-set -e
+# Diagnostic entrypoint: prints environment + AppRun perms, runs orca serve, and
+# on exit prints the code and sleeps so the Coolify logs API can surface output
+# for a crashing container. Revert to a plain `exec` once orca serve is stable.
+set +e
+echo "entrypoint starting as: $(id)"
+echo "DISPLAY=${DISPLAY:-<unset>} LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE}"
+echo "AppRun perms: $(ls -la /opt/orca/squashfs-root/AppRun 2>&1)"
+echo "which xvfb-run: $(command -v xvfb-run || true) ; Xvfb: $(command -v Xvfb || true)"
 
-# Orca auto-starts Xvfb for `orca serve` when DISPLAY is unset (per the headless
-# guide), so we do not start it manually. LIBGL_ALWAYS_SOFTWARE=1 is set in the
-# Dockerfile for GPU-less containers.
-#
-# --no-sandbox: Chromium's setuid sandbox cannot run inside a Docker container
-# as a non-root user (no SYS_ADMIN cap / seccomp allows it). Without this flag
-# the Electron process exits immediately.
-#
-# --pairing-address 127.0.0.1: the client reaches the server through an SSH
-#   local-forward tunnel (ssh -L 6768:127.0.0.1:6768 ...), so 127.0.0.1 is the
-#   correct address to advertise.
-# No --json: keep human-readable output so the pairing URL is visible in logs.
-exec /opt/orca/squashfs-root/AppRun --no-sandbox serve --port 6768 --pairing-address 127.0.0.1
+/opt/orca/squashfs-root/AppRun --no-sandbox serve --port 6768 --pairing-address 127.0.0.1
+rc=$?
+echo ">>> orca serve exited with code $rc"
+echo ">>> keeping container alive 10m for log inspection via Coolify API"
+sleep 600
+exit $rc
