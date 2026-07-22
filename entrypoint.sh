@@ -28,8 +28,13 @@ echo "which xvfb-run: $(command -v xvfb-run || true)  which script: $(command -v
 # --pairing-address 127.0.0.1: advertise the loopback address the desktop/mobile client
 # reaches through the SSH local-forward tunnel:
 #   ssh -i ./id_ed25519 -L 6768:127.0.0.1:6768 root@<host>
+# --json: emit the versioned single-line `orca_server_ready` JSON event (schemaVersion 1)
+# instead of the human-readable ready block. v1.4.150 did not print the human "Pairing
+# URL:" block to stdout even via a PTY; --json is the supervisor code path that always
+# emits a ready event with a `pairing` object (url / webClientUrl / qr when available,
+# or available:false + reason). The PTY flushes that single line to the Coolify logs.
 xvfb-run -a --server-args="-screen 0 1280x800x24 -ac" \
-  script -qfc "$APPDIR/AppRun --no-sandbox serve --port 6768 --pairing-address 127.0.0.1" /dev/null
+  script -qfc "$APPDIR/AppRun --no-sandbox serve --port 6768 --pairing-address 127.0.0.1 --json" /dev/null
 rc=$?
 echo ">>> orca serve exited with code $rc"
 echo ">>> keeping container alive 10m for log inspection via Coolify API"
