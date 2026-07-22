@@ -8,12 +8,15 @@ export APPDIR=/opt/orca/squashfs-root
 echo "entrypoint starting as: $(id)"
 echo "APPDIR=$APPDIR"
 echo "DISPLAY=${DISPLAY:-<unset>} LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE}"
-echo "AppRun perms: $(ls -la "$APPDIR/AppRun" 2>&1)"
+echo "which xvfb-run: $(command -v xvfb-run || true)"
 
-# APPDIR must be set so AppRun (a shell script) resolves $APPDIR/orca-ide;
-# without it, AppRun looks for /orca-ide and fails with 127.
+# Wrap in xvfb-run: it starts Xvfb and sets $DISPLAY. The headless guide says
+# Orca auto-starts Xvfb when DISPLAY is unset, but that did not happen in this
+# container (Electron died with "Missing X server or $DISPLAY"), so start one
+# explicitly. APPDIR is set so AppRun resolves $APPDIR/orca-ide.
 # --no-sandbox: Chromium's sandbox can't run in Docker as non-root.
-"$APPDIR/AppRun" --no-sandbox serve --port 6768 --pairing-address 127.0.0.1
+xvfb-run -a --server-args="-screen 0 1280x800x24 -ac" \
+  "$APPDIR/AppRun" --no-sandbox serve --port 6768 --pairing-address 127.0.0.1
 rc=$?
 echo ">>> orca serve exited with code $rc"
 echo ">>> keeping container alive 10m for log inspection via Coolify API"
