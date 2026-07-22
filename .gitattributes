@@ -1,0 +1,5 @@
+# Force LF line endings — entrypoint.sh must not have CRLF when run on Linux.
+* text=auto eol=lf
+*.sh text eol=lf
+entrypoint.sh text eol=lf
+Dockerfile text eol=lf
