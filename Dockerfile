@@ -17,11 +17,20 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LIBGL_ALWAYS_SOFTWARE=1
-ENV DISPLAY=:99
+# DISPLAY intentionally unset: Orca auto-starts Xvfb for `orca serve` when no
+# DISPLAY is set (per the headless guide).
 
-# Headless-guide runtime deps + git + build/prereq tools.
+# Headless-guide runtime deps + git + build/prereq tools, PLUS the shared
+# libraries Electron/Chromium needs. The headless guide targets a full Ubuntu
+# install; the minimal ubuntu:22.04 base image lacks these, so without them
+# orca serve exits immediately on startup.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl file jq xvfb zlib1g-dev libfuse2 ca-certificates git gnupg xz-utils \
+        libnss3 libxss1 libasound2 libatk-bridge2.0-0 libatk1.0-0 \
+        libcairo2 libcups2 libdbus-1-3 libdrm2 libgbm1 libgdk-pixbuf2.0-0 \
+        libgtk-3-0 libnspr4 libpango-1.0-0 libxcomposite1 libxdamage1 \
+        libxfixes3 libxrandr2 libxkbcommon0 libxshmfence1 libx11-6 libxcb1 \
+        libxext6 libxres1 fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 # Node 20 LTS — needed to install the coding-agent CLIs (Claude Code, Codex).
