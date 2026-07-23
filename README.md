@@ -34,14 +34,29 @@ holds the Dockerfile + entrypoint that Coolify builds from.
 
 ```
 xvfb-run -a --server-args="-screen 0 1280x800x24 -ac" \
-  /opt/orca/squashfs-root/AppRun --no-sandbox serve --port 6768 --pairing-address 127.0.0.1
+  /opt/orca/squashfs-root/AppRun --no-sandbox --serve --serve-port 6768 \
+    --serve-pairing-address 127.0.0.1
 ```
+
+> ⚠️ The flags are **Electron-format** (`--serve --serve-port … --serve-pairing-address …`),
+> not the `orca` CLI subcommand form (`serve --port … --pairing-address …`). See
+> [Headless build gotchas](#headless-build-gotchas) for why this matters — getting it wrong
+> was the root cause of this deployment emitting no pairing URL for several iterations.
 
 The server:
 
+- Enters **serve mode** (`--serve`), starts the runtime, and prints readiness + a pairing
+  URL to stdout (captured in `docker logs`):
+  ```
+  Orca server ready: ws://0.0.0.0:6768
+  Web client URL: http://127.0.0.1:6768/web-index.html#pairing=orca%3A%2F%2Fpair%3Fcode%3D…
+  Pairing URL: orca://pair?code=…
+  ```
 - Listens on `0.0.0.0:6768` (WebSocket + HTTP).
 - Serves the **Orca Web** client at `http://<host>:6768` — the full Orca UI (terminals,
-  agents, worktrees, settings) running in a browser.
+  agents, worktrees, settings) running in a browser. Its landing page is a
+  "Connect to Orca — paste a pairing URL" page; you pair it with the `Web client URL` or
+  `Pairing URL` above (see [Reachability](#reachability-private-only)).
 - Writes runtime state to `~/.config/orca/orca-runtime.json`, which records the WebSocket
   endpoint (`ws://0.0.0.0:6768`), a `runtimeId`, and an `authToken`.
 - Writes app logs to `~/.config/orca/logs/daemon.log` and `~/.config/orca/logs/main.trace.ndjson`.
@@ -79,8 +94,23 @@ The [Dockerfile](Dockerfile) is layered as follows:
 ## Headless build gotchas
 
 These are the non-obvious things that had to be solved to make Orca run in a container
-(each was a real crash-loop until fixed):
+(each was a real crash-loop or silent failure until fixed):
 
+- **Pass Electron `--serve` flags, not the CLI `serve` subcommand.** `AppRun` execs the
+  Electron binary **directly** — it does *not* route through the `orca` CLI wrapper that
+  would translate the `serve` subcommand into Electron flags. The Electron main
+  (`app.asar` → `out/main/index.js`) gates serve mode on a literal argv token:
+  `const isServeMode = process.argv.includes("--serve");`, and `getServeOptions()` reads
+  `--serve-port`, `--serve-pairing-address`, `--serve-recipe-json`, `--serve-mobile-pairing`,
+  `--serve-project-root`, `--serve-no-pairing`, `--serve-json`. If you pass the CLI form
+  `serve --port 6768 --pairing-address 127.0.0.1`, `isServeMode` is false and the app
+  **silently opens its GUI window on Xvfb** instead. Headed mode still starts the runtime +
+  WebSocket server (so `:6768` returns HTTP 200 and the daemon log looks healthy) but
+  **never calls `printServeReady`**, so no `Orca server ready` / `Pairing URL` is printed and
+  every serve flag is ignored. This was the root cause of this deployment emitting no
+  pairing URL across several iterations (`--mobile-pairing`, `--recipe-json`, plain
+  `serve` all no-op'd for the same reason). Fix: pass
+  `--serve --serve-port 6768 --serve-pairing-address 127.0.0.1` directly.
 - **No FUSE → extract the AppImage.** Docker containers have no FUSE device, so the
   AppImage can't be mounted at runtime. Extract it once at build time with
   `--appimage-extract` and run `squashfs-root/AppRun`.
@@ -103,43 +133,52 @@ These are the non-obvious things that had to be solved to make Orca run in a con
 
 > This is the single most important thing to know about this deployment.
 
-The headless guide on Orca's **`main` branch** describes a startup banner like:
+When serve mode is active (`--serve` in argv — see the gotcha above), Orca v1.4.150 prints
+this startup banner to stdout (captured in `docker logs`):
 
 ```
 Orca server ready: ws://0.0.0.0:6768
+Web client URL: http://127.0.0.1:6768/web-index.html#pairing=orca%3A%2F%2Fpair%3Fcode%3D…
 Pairing URL: orca://pair?code=…
 ```
 
-and a `--json` flag that emits an `orca_server_ready` event with a `pairing` object
-(`url`, `webClientUrl`, `qr`, …) for supervisors.
+The `--serve-json` flag (Electron form; CLI form `--json`) instead emits an
+`orca_server_ready` JSON event with a `pairing` object (`url`, `webClientUrl`, `qr`, …) for
+supervisors. This image uses the plain text path because it's the simplest way to capture
+the pairing URL in `docker logs`.
 
-**Orca v1.4.150 emits none of that.** This was verified across every output channel: stdout,
-`~/.config/orca/logs/daemon.log`, `~/.config/orca/logs/main.trace.ndjson`, and
-`~/.config/orca/orca-runtime.json`. The `--json` flag is not a v1.4.150 flag. The
-`orca://pair?code=…` ready/JSON contract is from a newer build than the current release.
+Key facts about the pairing URL:
 
-What v1.4.150 **does** provide:
+- The `Pairing URL`'s `deviceToken` is a fresh **pending-device token from Orca's device
+  registry** (`DeviceRegistry.getOrCreatePendingDevice`), minted only when the WebSocket
+  transport is enabled. It is **not** the `authToken` in `~/.config/orca/orca-runtime.json`.
+  Do **not** hand-build a pairing URL from `orca-runtime.json` — the server rejects such
+  URLs as **"Unauthorized. Pair this web client again."** because `authToken` is the runtime
+  session token, not a pairing invite token. Always use the server-emitted `Pairing URL`.
+- The `Web client URL` is just `http://<host>:6768/web-index.html#pairing=<url-encoded
+  Pairing URL>` — opening it in a browser auto-pairs the web client (no pasting needed).
+- **Runtime vs. mobile scope** are mutually exclusive in one invocation: runtime scope
+  (browser Web UI, **no Orca account**) is what this build uses; mobile scope
+  (`--serve-mobile-pairing`, phone) requires Orca account sign-in that a headless server
+  can't easily perform, so phone-app QR pairing is not enabled here.
+- The pairing token **rotates on every container start** until `~/.config/orca` is
+  persisted (see [Persistent storage](#persistent-storage)). Until then, a saved browser
+  connection breaks on each redeploy and you must re-pair with the new URL from `docker logs`.
 
-- The **Orca Web** UI served on :6768 — the full Orca client in a browser.
-- A WebSocket endpoint + `authToken` + `runtimeId` in `~/.config/orca/orca-runtime.json`,
-  e.g.:
-  ```json
-  {
-    "runtimeId": "<uuid>",
-    "transports": [
-      {"kind":"unix","endpoint":"/home/orca/.config/orca/o-25-<runtimeId>.sock"},
-      {"kind":"websocket","endpoint":"ws://0.0.0.0:6768"}
-    ],
-    "authToken": "<token>",
-    "startedAt": 1784758878476
-  }
-  ```
+`~/.config/orca/orca-runtime.json` still records the runtime endpoint + a session
+`authToken` (a separate secret — see [Security notes](#security-notes)):
 
-So the **supported way to use this server is the Orca Web UI over an SSH tunnel**, not a
-pairing URL. Desktop/mobile-app pairing (pasting an `orca://pair` URL into the Orca app)
-is **not available** with v1.4.150 under the loopback-tunnel model; it would need either a
-newer Orca release that emits pairing URLs, or a reachable non-loopback advertised address
-(see [Reachability](#reachability-private-only)).
+```json
+{
+  "runtimeId": "<uuid>",
+  "transports": [
+    {"kind":"unix","endpoint":"/home/orca/.config/orca/o-25-<runtimeId>.sock"},
+    {"kind":"websocket","endpoint":"ws://0.0.0.0:6768"}
+  ],
+  "authToken": "<token>",
+  "startedAt": 1784758878476
+}
+```
 
 ## Reachability (private only)
 
@@ -150,16 +189,33 @@ Coolify publishes `6768:6768` to the host (binds `0.0.0.0:6768`). The host's fir
 6768 externally, so the port is only reachable through the tunnel. From your client machine:
 
 ```bash
-ssh -i ./id_ed25519 -L 6768:127.0.0.1:6768 root@<host-ip>
+ssh -i ./id_ed25519 -N -L 6768:127.0.0.1:6768 root@<host-ip>
 ```
 
-Then open **http://127.0.0.1:6768** in a browser. The Orca Web UI loads and connects back
-over the same loopback WebSocket — no pairing URL required.
+(`-N` = no shell, `-L` = forward the client's `localhost:6768` to the host's `127.0.0.1:6768`.)
 
-`--pairing-address 127.0.0.1` makes the advertised endpoint match the tunnel's
-`127.0.0.1:6768`. Override it with the `ORCA_PAIRING_ADDRESS` env var if you switch to a
-different reachability model (e.g. a Tailscale IP, where you'd set it to the host's
-Tailscale address and reach 6768 over the Tailscale network instead of an SSH tunnel).
+Then connect the **Orca Web** client. The Web UI's landing page is a "Connect to Orca —
+paste a pairing URL" page, so you need the pairing data the server printed. Easiest path:
+
+1. Get the `Web client URL` / `Pairing URL` the server printed:
+   ```bash
+   ssh -i ./id_ed25519 root@<host-ip> \
+     'docker logs <container> 2>&1 | grep -E "Web client URL|Pairing URL"'
+   ```
+2. **Either** open the `Web client URL` in your browser with `127.0.0.1`→`localhost`
+   (pairing code is embedded in the URL fragment, so it auto-pairs):
+   ```
+   http://localhost:6768/web-index.html#pairing=orca%3A%2F%2Fpair%3Fcode%3D…
+   ```
+   **Or** open `http://localhost:6768/` and paste the `Pairing URL`
+   (`orca://pair?code=…`) into the "Orca Server" box, then click **Connect**.
+
+`--serve-pairing-address 127.0.0.1` makes the endpoint encoded inside the pairing URL match
+the tunnel's `127.0.0.1:6768`. Override it with the `ORCA_PAIRING_ADDRESS` env var if you
+switch to a different reachability model (e.g. a Tailscale IP, where you'd set it to the
+host's Tailscale address and reach 6768 over the Tailscale network instead of an SSH
+tunnel). Desktop/mobile-app native pairing needs a reachable non-loopback advertised
+address; under the loopback-tunnel model the browser Web UI is the supported client.
 
 ## Coolify setup (step-by-step)
 
@@ -185,7 +241,8 @@ Tailscale address and reach 6768 over the Tailscale network instead of an SSH tu
 4. **Persistent storage (required):** add a persistent volume in the Coolify UI
    (**Settings → Persistent Storage**) mounted at **`/home/orca`**. See
    [Persistent storage](#persistent-storage). There is **no API endpoint** for this; it's a
-   one-time manual UI step.
+   one-time manual UI step. Without it the pairing token rotates on every redeploy and
+   saved browser connections break.
 
 5. **Environment variables:** add `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` (mark secret).
    See [Environment variables](#environment-variables).
@@ -198,7 +255,7 @@ Tailscale address and reach 6768 over the Tailscale network instead of an SSH tu
 | --- | --- | --- |
 | `ANTHROPIC_API_KEY` | runtime, secret | Authenticates the Claude Code CLI. |
 | `OPENAI_API_KEY` | runtime, secret | Authenticates the Codex CLI. |
-| `ORCA_PAIRING_ADDRESS` | runtime, optional | Address advertised to clients. Defaults to `127.0.0.1` (matches the SSH tunnel). |
+| `ORCA_PAIRING_ADDRESS` | runtime, optional | Address advertised inside the pairing URL. Defaults to `127.0.0.1` (matches the SSH tunnel). |
 | `ORCA_VERSION` | **build-time `ARG`**, not env | Pin the Orca release, e.g. `--build-arg ORCA_VERSION=v1.4.150`. Defaults to `latest`. |
 
 ## First run / verification
@@ -212,26 +269,37 @@ Tailscale address and reach 6768 over the Tailscale network instead of an SSH tu
      'docker port $(docker ps --format "{{.Names}}" | grep <app-uuid> | head -1)'
    curl -s -o /dev/null -w "%{http_code}\n" --max-time 5 http://127.0.0.1:6768/
    ```
-3. **Use it:** open the SSH tunnel (above) and browse to http://127.0.0.1:6768 — the Orca
-   Web UI should load.
-4. **Agent smoke test:** from the Web UI, run a trivial task with Claude Code and one with
+3. **Serve-mode check:** confirm serve mode is active (not just headed-on-Xvfb) — the
+   container logs must contain the readiness banner:
+   ```bash
+   ssh -i ./id_ed25519 root@<host-ip> \
+     'docker logs <container> 2>&1 | grep -E "Orca server ready|Web client URL|Pairing URL"'
+   ```
+   If those lines are absent, see the first row of [Troubleshooting](#troubleshooting).
+4. **Use it:** open the SSH tunnel (above), extract the `Web client URL` from the logs,
+   and open it in your browser with `127.0.0.1`→`localhost` (see
+   [Reachability](#reachability-private-only)). The Orca Web UI should load and pair
+   automatically.
+5. **Agent smoke test:** from the Web UI, run a trivial task with Claude Code and one with
    Codex to confirm both CLIs are present and authenticated.
-5. **Persistence check:** trigger a redeploy and confirm the Web UI still recognizes the
-   session afterward (proves the `/home/orca` volume is working).
+6. **Persistence check:** trigger a redeploy and confirm the Web UI still recognizes the
+   session afterward (proves the `/home/orca` volume is working and the pairing token did
+   not rotate).
 
 ## Persistent storage
 
 Orca's identity, paired-device keys, profile data, and the agent-CLI configs live under the
 `orca` user's home (`~/.config/orca`, `~/.orca`, `~/.claude`, `~/.codex`, `~/.gemini`, …).
 Without persistence, **every redeploy resets all of it** — Orca gets a new `runtimeId`, the
-E2EE keypair regenerates, and any connected clients must be re-established.
+E2EE keypair regenerates, the device registry resets, and **the pairing token rotates**, so
+any connected browser client must be re-paired with the new `Pairing URL` from `docker logs`.
 
 - **Mount a persistent volume at `/home/orca`** (covers both `~/.config/orca` runtime state
   and the dotfile agent configs).
 - **Add it via the Coolify UI** (Settings → Persistent Storage). Coolify exposes **no API
   endpoint** for persistent storage, and `custom_docker_run_options -v` is ignored (see the
   gotcha above), so this is a manual one-time UI step.
-- **Verify** by redeploying and confirming the session survives (step 5 above).
+- **Verify** by redeploying and confirming the session survives (step 6 above).
 
 ## Pinning & upgrading the Orca version
 
@@ -247,15 +315,17 @@ upgrade SOP notes that persisted state lives under `~/.config` and survives bina
 replacement, so a pinned image can still read existing state after an upgrade.
 
 > ⚠️ **`latest` rolls forward** and a future release may change runtime needs (new libs,
-> different flags, the pairing-URL contract landing, etc.). Pinning a specific release makes
-> deploys reproducible. Note also that the pairing-URL behavior documented on `main` may
-> differ from the release you actually pull — verify against the *tagged* docs for your
-> `ORCA_VERSION` (e.g. the `v1.4.150` headless guide linked at the top).
+> different flags, etc.). Pinning a specific release makes deploys reproducible. Note also
+> that the headless docs on `main` may describe behavior ahead of the release you actually
+> pull — verify against the *tagged* docs for your `ORCA_VERSION` (e.g. the `v1.4.150`
+> headless guide linked at the top).
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
+| No `Orca server ready` / `Pairing URL` in `docker logs`, but `:6768` returns HTTP 200 | Passed the CLI subcommand form (`serve --port … --pairing-address …`) to `AppRun`, which execs Electron directly — so `isServeMode` was false and the app opened its GUI window on Xvfb instead of entering serve mode. The WS server still starts (HTTP 200) but `printServeReady` never runs. | Pass Electron-format flags directly: `--serve --serve-port 6768 --serve-pairing-address 127.0.0.1`. |
+| `Unauthorized. Pair this web client again.` when pasting a pairing URL | The URL was hand-built using the `authToken` from `orca-runtime.json` (the runtime session token), not a real pairing invite token. | Use the `Pairing URL` the server printed to `docker logs` (its `deviceToken` comes from the device registry). Don't hand-build pairing URLs. |
 | Container exits **126** | Missing Electron/Chromium shared libs on the minimal base. | Ensure the full lib list in the Dockerfile's `apt-get install` is present. |
 | Container exits **127**, `/orca-ide: No such file or directory` | `APPDIR` not set; `AppRun` can't resolve `$APPDIR/orca-ide`. | `export APPDIR=/opt/orca/squashfs-root` (done in the entrypoint). |
 | **Segfault (139)**, "Missing X server or $DISPLAY" | Orca's auto-Xvfb did not start in the container. | Wrap the launch in `xvfb-run -a` (done in the entrypoint). |
@@ -263,8 +333,7 @@ replacement, so a pinned image can still read existing state after an upgrade.
 | `[ERROR:dbus/bus.cc] …` / `gpu … ContextResult::kTransientFailure` | Harmless Chromium stderr noise in a container without D-Bus/GPU. | Ignore — orca serve works fine despite these. |
 | Coolify logs API returns `400 "Application is not running"` | The container has already exited, and the API only serves running containers. | The entrypoint keeps the container alive briefly after an exit (`sleep 60`) so logs are capturable; or inspect via SSH `docker logs`. |
 | Port 6768 not published / no mounts despite `custom_docker_run_options` | `custom_docker_run_options` is ignored for Dockerfile apps. | Use `ports_mappings` (API) for the port and the Coolify UI for the volume. |
-| `--json` not recognized / no `orca_server_ready` event | `--json` is not a v1.4.150 flag (it's from a newer `main` build). | Don't use `--json` on v1.4.150; use the Orca Web UI. |
-| No `Pairing URL: orca://…` anywhere | v1.4.150 doesn't emit it (see [Pairing model](#pairing-model-v14150)). | Use the Orca Web UI over the SSH tunnel. |
+| Saved browser connection breaks after every redeploy | Pairing token rotates on each container start because `~/.config/orca` isn't persisted. | Mount a persistent volume at `/home/orca` (see [Persistent storage](#persistent-storage)). |
 
 **Reading logs:**
 - Coolify API: `GET /api/v1/applications/<uuid>/logs` → returns `{"logs": "<string>"}` (not
@@ -279,16 +348,24 @@ replacement, so a pinned image can still read existing state after an upgrade.
 - **Secrets.** `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` are stored as Coolify env vars (mark
   secret / not exposed). The `authToken` in `orca-runtime.json` is a secret too — don't
   expose it.
+- **Pairing URLs are credentials.** The `Pairing URL` and `Web client URL` embed the
+  device-registry `deviceToken` as base64 (reversible). Treat them like a password — don't
+  post them publicly or commit them. They're only useful to someone who can also reach your
+  loopback tunnel, so the practical exposure is low, but a leaked URL lets a third party pair
+  their own browser to your server until you redeploy (which mints a new token) or revoke.
 - **Firewall.** The host firewall blocks 6768 externally; only the SSH tunnel reaches it.
 
 ## Known limitations
 
 - Agent auth is **API-key only** in a headless container; interactive OAuth/subscription
   login is impractical here.
-- **No `orca://pair` URL in v1.4.150** — desktop/mobile-app pairing isn't available under
-  the loopback-tunnel model. Use the Orca Web UI, or upgrade Orca / switch to a non-loopback
-  advertised address for native-app pairing.
-- The headless docs on `main` describe behavior ahead of the v1.4.150 release; always
+- **Phone-app (mobile) pairing is not enabled.** It needs `--serve-mobile-pairing` plus an
+  Orca account sign-in that a headless server cannot easily perform (the mobile QR is an
+  in-app, signed-in flow). Browser Web UI pairing (runtime scope, no account) is what this
+  build supports.
+- **Pairing token rotates per redeploy until `/home/orca` is persisted**, so saved browser
+  connections break on each redeploy. Mount the volume (see [Persistent storage](#persistent-storage)).
+- The headless docs on `main` may describe behavior ahead of the v1.4.150 release; always
   cross-check the tagged docs for your pinned `ORCA_VERSION`.
 
 ## Repository files
@@ -296,7 +373,7 @@ replacement, so a pinned image can still read existing state after an upgrade.
 | File | Purpose |
 | --- | --- |
 | [Dockerfile](Dockerfile) | The image: base, deps + Electron libs, Node + agent CLIs, AppImage download/extract, `orca` user, entrypoint. |
-| [entrypoint.sh](entrypoint.sh) | Starts Xvfb and runs `orca serve --port 6768 --pairing-address 127.0.0.1`. |
+| [entrypoint.sh](entrypoint.sh) | Starts Xvfb and runs `AppRun --no-sandbox --serve --serve-port 6768 --serve-pairing-address 127.0.0.1`. |
 | [README.md](README.md) | This document. |
 | [.gitattributes](.gitattributes) | Forces LF line endings for `entrypoint.sh` and `Dockerfile`. |
 
