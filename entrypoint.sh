@@ -14,28 +14,36 @@ echo "pairing-address=${ORCA_PAIRING_ADDRESS:-127.0.0.1}"
 # resolves $APPDIR/orca-ide.
 #
 # --no-sandbox: Chromium's sandbox can't run in Docker as non-root.
-# --recipe-json: print a runtime-scoped pairing URL to stdout as a single JSON object
-#   { "schemaVersion": 1, "pairingCode": "orca://pair?code=…", "projectRoot": "…" }
-# (captured in `docker logs`). The Orca Web client served at http://127.0.0.1:6768 has
-# a "Connect to Orca" page — open it in a browser over the SSH local-forward tunnel and
-# paste the pairingCode there to connect this browser as an Orca client to the server.
-# Runtime pairing needs no Orca account. --pairing-address 127.0.0.1 makes the encoded
-# WebSocket endpoint reachable through the tunnel:
-#   ssh -i ./id_ed25519 -L 6768:127.0.0.1:6768 root@<host>
-# Override the advertised address with ORCA_PAIRING_ADDRESS (e.g. a Tailscale IP or a
-# public wss:// URL) and the workspace root with ORCA_PROJECT_ROOT if needed.
 #
-# Pairing model: `--recipe-json` (runtime scope, browser Web UI, no account) and
-# `--mobile-pairing` (mobile scope, phone, requires Orca sign-in) are mutually exclusive
-# in one `serve` invocation. This build targets the browser. Phone pairing is NOT
-# enabled here: it needs `--mobile-pairing` plus an Orca account sign-in that a headless
-# server cannot easily perform (the mobile QR is an in-app, signed-in flow). v1.4.150
-# also exposes the WebSocket endpoint + authToken in ~/.config/orca/orca-runtime.json.
+# Plain `orca serve` (no --recipe-json / --mobile-pairing) prints, to stdout:
+#   - the runtime endpoint (ws://…), and
+#   - a runtime-scoped pairing URL  orca://pair?code=<base64url(offer)>
+# and, when the web client bundle is present, a browser URL with the pairing data
+# embedded. We capture that stdout in `docker logs` and hand the pairing URL to the
+# user to paste into the "Connect to Orca" page at http://127.0.0.1:6768 over the SSH
+# local-forward tunnel:
+#   ssh -i ./id_ed25519 -L 6768:127.0.0.1:6768 root@<host>
+# Runtime pairing needs no Orca account. --pairing-address 127.0.0.1 makes the encoded
+# WebSocket endpoint reachable through the tunnel.
+#
+# Why NOT --recipe-json: that flag switches stdout to a JSON object
+#   { "schemaVersion": 1, "pairingCode": "…", "projectRoot": "…" }
+# which is documented for the dev CLI (pnpm exec orca-dev serve) but does NOT emit in
+# the packaged AppImage build — nothing reaches stdout or any file. Worse, passing it
+# suppresses the normal text pairing-URL printout, leaving no usable pairing URL at
+# all. Plain serve is the path that actually prints a pairing URL carrying the token
+# the server validates (hand-building a URL from runtime.json authToken does NOT work
+# — the server rejects it as "Unauthorized" because authToken is the runtime session
+# token, not a pairing invite token).
+#
+# Pairing model: runtime scope (browser Web UI, no account, this build) vs. mobile
+# scope (phone, --mobile-pairing, requires Orca account sign-in a headless server
+# can't do). The two are mutually exclusive in one serve invocation.
+# Override the advertised address with ORCA_PAIRING_ADDRESS (e.g. a Tailscale IP or a
+# public wss:// URL) if needed.
 xvfb-run -a --server-args="-screen 0 1280x800x24 -ac" \
   "$APPDIR/AppRun" --no-sandbox serve --port 6768 \
-    --pairing-address "${ORCA_PAIRING_ADDRESS:-127.0.0.1}" \
-    --project-root "${ORCA_PROJECT_ROOT:-/home/orca}" \
-    --recipe-json
+    --pairing-address "${ORCA_PAIRING_ADDRESS:-127.0.0.1}"
 rc=$?
 echo ">>> orca serve exited with code $rc"
 # Brief fallback so a crash stays visible long enough for the Coolify logs API to
