@@ -35,8 +35,20 @@ holds the Dockerfile + entrypoint that Coolify builds from.
 ```
 xvfb-run -a --server-args="-screen 0 1280x800x24 -ac" \
   /opt/orca/squashfs-root/AppRun --no-sandbox --serve --serve-port 6768 \
-    --serve-pairing-address 127.0.0.1
+    --serve-pairing-address "${ORCA_PAIRING_ADDRESS:-127.0.0.1}" \
+    ${ORCA_MOBILE_PAIRING:+--serve-mobile-pairing}
 ```
+
+The two env-driven parts:
+- `ORCA_PAIRING_ADDRESS` is the address baked into the pairing blob as the WebSocket
+  endpoint. Default `127.0.0.1` (for an SSH local-forward tunnel). Set it to
+  `wss://<node>.<tailnet>.ts.net` for the **Tailscale Serve** model used in production, to
+  the host's Tailscale IP for the plain tailnet fallback, or to a public `wss://host` URL
+  for a no-auth public domain (see [Reachability](#reachability)).
+- `ORCA_MOBILE_PAIRING` switches the instance to **mobile** scope. `${VAR:+…}` means any
+  non-empty value (including `"0"`) enables it — to get **runtime** scope you must leave it
+  unset/empty (delete the env var), not set it to `0`. Runtime scope is the default and what
+  production uses.
 
 > ⚠️ The flags are **Electron-format** (`--serve --serve-port … --serve-pairing-address …`),
 > not the `orca` CLI subcommand form (`serve --port … --pairing-address …`). See
@@ -56,7 +68,7 @@ The server:
 - Serves the **Orca Web** client at `http://<host>:6768` — the full Orca UI (terminals,
   agents, worktrees, settings) running in a browser. Its landing page is a
   "Connect to Orca — paste a pairing URL" page; you pair it with the `Web client URL` or
-  `Pairing URL` above (see [Reachability](#reachability-private-only)).
+  `Pairing URL` above (see [Reachability](#reachability)).
 - Writes runtime state to `~/.config/orca/orca-runtime.json`, which records the WebSocket
   endpoint (`ws://0.0.0.0:6768`), a `runtimeId`, and an `authToken`.
 - Writes app logs to `~/.config/orca/logs/daemon.log` and `~/.config/orca/logs/main.trace.ndjson`.
@@ -78,18 +90,37 @@ The [Dockerfile](Dockerfile) is layered as follows:
    libpango-1.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxkbcommon0
    libxshmfence1 libx11-6 libxcb1 libxext6 libxres1 fonts-liberation`.
 
-3. **Node 20 LTS** (NodeSource), so the coding-agent CLIs can be installed globally.
+3. **Node 22 LTS** (NodeSource). Node 22+ is required by the `@anthropic-ai/claude-code`
+   npm package as of v2.1.198 (Node 20 only warns `EBADENGINE` today, but will fail in a
+   future release). Needed to install the coding-agent CLIs.
 
-4. **Agent CLIs:** `npm install -g @anthropic-ai/claude-code @openai/codex`. Authenticated
-   at runtime via API-key env vars (see [Environment variables](#environment-variables)).
+4. **Non-root runtime user + user-owned npm prefix:** `useradd -m -s /bin/bash orca` and
+   `mkdir -p /opt/node-global` (`chown orca:orca`), created **before** the CLI install.
+   `ENV NPM_CONFIG_PREFIX=/opt/node-global` and `ENV PATH=/opt/node-global/bin:…` are set
+   as image env so Orca and the `claude`/`codex` processes it spawns all resolve here.
 
-5. **Orca AppImage:** downloaded from the GitHub release (latest by default, or a pinned
-   `ORCA_VERSION`), then `--appimage-extract` once at build time (no FUSE at runtime) into
-   `/opt/orca/squashfs-root`, then `chmod -R a+rX` + `chmod a+rx AppRun` so the non-root user
-   can execute it.
+5. **Agent CLIs (installed as `orca`, not root):** `npm install -g @anthropic-ai/claude-code
+   @openai/codex` runs under `USER orca` with `NPM_CONFIG_PREFIX=/opt/node-global`, so the
+   packages land in `/opt/node-global/lib/node_modules` with bins in `/opt/node-global/bin`,
+   **owned by `orca`**. Authenticated at runtime via API-key env vars (see
+   [Environment variables](#environment-variables)).
+   - **Why user-owned:** the container runs as the unprivileged `orca` user (no sudo). A
+     root-owned global npm install left Claude Code's auto-updater unable to write to the
+     global dir, so it printed a "npm global directory isn't writable" permission notice at
+     startup and `npm install -g …@latest` failed from the Orca terminal. The user-owned
+     prefix fixes both: auto-update works, and you can update manually from the Orca
+     terminal with `npm install -g @anthropic-ai/claude-code@latest`.
+   - **Redeploy behavior:** CLI updates write to `/opt/node-global` (the container's
+     writable layer), so a redeploy resets the CLIs to this build-pinned version and then
+     auto-updates forward. Settings/auth live on the `/home/orca` volume and are unaffected.
 
-6. **Non-root runtime user:** `useradd -m -s /bin/bash orca`. `WORKDIR /home/orca`,
-   `EXPOSE 6768`, `USER orca`, `ENTRYPOINT ["/entrypoint.sh"]`.
+6. **Orca AppImage (back to root):** `USER root`, then the AppImage is downloaded from the
+   GitHub release (latest by default, or a pinned `ORCA_VERSION`), `--appimage-extract` once
+   at build time (no FUSE at runtime) into `/opt/orca/squashfs-root`, then `chmod -R a+rX` +
+   `chmod a+rx AppRun` so the non-root user can execute it.
+
+7. **Drop to `orca` for runtime:** `WORKDIR /home/orca`, `EXPOSE 6768`, `USER orca`,
+   `ENTRYPOINT ["/entrypoint.sh"]`.
 
 ## Headless build gotchas
 
@@ -157,10 +188,18 @@ Key facts about the pairing URL:
   session token, not a pairing invite token. Always use the server-emitted `Pairing URL`.
 - The `Web client URL` is just `http://<host>:6768/web-index.html#pairing=<url-encoded
   Pairing URL>` — opening it in a browser auto-pairs the web client (no pasting needed).
-- **Runtime vs. mobile scope** are mutually exclusive in one invocation: runtime scope
-  (browser Web UI, **no Orca account**) is what this build uses; mobile scope
-  (`--serve-mobile-pairing`, phone) requires Orca account sign-in that a headless server
-  can't easily perform, so phone-app QR pairing is not enabled here.
+- **Runtime vs. mobile scope** are mutually exclusive in one invocation:
+  - **Runtime scope** (default, `ORCA_MOBILE_PAIRING` unset) — the browser Web UI, full
+    permissions including `repo.add` (adding projects), **no Orca account** needed. This is
+    what production uses.
+  - **Mobile scope** (`--serve-mobile-pairing` / `ORCA_MOBILE_PAIRING` set) — for Orca's
+    *native* desktop/mobile apps. It does **not** require an Orca account on the server side
+    (an earlier version of this README was wrong about that — the "requires account" claim
+    came from tests that never activated serve mode). However, mobile-scope clients are
+    **sandboxed**: `repo.add` (adding projects) is rejected with
+    `method repo.add is not available to mobile clients`. So if you need to add projects,
+    use **runtime scope** (the browser Web UI), not the native app. Switch by
+    setting/deleting `ORCA_MOBILE_PAIRING` and redeploying.
 - The pairing token **rotates on every container start** until `~/.config/orca` is
   persisted (see [Persistent storage](#persistent-storage)). Until then, a saved browser
   connection breaks on each redeploy and you must re-pair with the new URL from `docker logs`.
@@ -180,42 +219,125 @@ Key facts about the pairing URL:
 }
 ```
 
-## Reachability (private only)
+## Reachability
 
-Orca's docs warn against exposing `orca serve` to the public internet. This image is meant
-to be reached over an **SSH local-forward tunnel** — no public domain, no firewall port.
+> **Current production access URL: `https://hetzner-orca.tail5350b8.ts.net/`**
+> (Tailscale Serve, tailnet-only, real `*.ts.net` cert, runtime scope — the browser Web UI).
+> Open it on a **Tailscale-connected** device. The first visit needs the `#pairing=…` Web
+> client URL from `docker logs` (auto-pairs the browser); then bookmark the bare URL above.
+>
+> ⚠️ **Do not use `http://localhost:6768` or `http://127.0.0.1:6768` unless you are running
+> the SSH local-forward tunnel** described under "Alternative" below. Opening a localhost
+> URL without the tunnel produces Chrome's `ERR_CONNECTION_REFUSED / "localhost refused to
+> connect"` (the address-bar URL points at your own machine, where nothing is listening). The
+> `localhost` path is a fallback access model, not the primary one — bookmark the `*.ts.net`
+> URL instead.
 
-Coolify publishes `6768:6768` to the host (binds `0.0.0.0:6768`). The host's firewall blocks
-6768 externally, so the port is only reachable through the tunnel. From your client machine:
+Orca's docs warn against exposing `orca serve` to the public internet. The production
+deployment reaches it over **Tailscale** — no public domain, no open firewall port, no auth
+proxy needed. Two other models are documented below (SSH tunnel; public domain) for context.
+
+### Production model: Tailscale Serve (HTTPS, tailnet-only)
+
+The host runs Tailscale and is itself a tailnet node, so it has both a stable tailnet IP
+(e.g. `100.65.54.114`) and a **MagicDNS** name of the form `<node>.<tailnet>.ts.net`
+(e.g. `hetzner-orca.tail5350b8.ts.net`). **Tailscale Serve** terminates TLS on that name
+and proxies it to the local Orca port, giving a real `https://<node>.<tailnet>.ts.net/` URL
+with a browser-trusted cert — private (tailnet-only), **no basic auth**, and WebSocket
+upgrades pass through (so it sidesteps the basic-auth breakage documented under the public
+domain below). This is the production model.
+
+Coolify publishes `6768:6768` to the host (`0.0.0.0:6768`). Serve does **not** bind the
+host's public 443 — it terminates TLS inside `tailscaled` on the tailnet plane, so it does
+not collide with Coolify's Traefik (which owns public 80/443).
+
+> ⚠️ **Firewall caveat (post-2026-07-23 migration):** the production Tailscale-Serve URL is
+> tailnet-only regardless (Serve listens on the tailnet plane, not the public NIC). **But**
+> the current host has **no Hetzner Cloud firewall**, so the raw `6768` port **is publicly
+> exposed** on the host's public IP (`http://<host-ip>:6768/` returns 200 to anyone). The
+> pre-migration host had a `coolify-firewall` blocking 6768; it did not carry over to the new
+> server. This is a known security regression pending a firewall fix (apply a Hetzner firewall
+> allowing 22/80/443/41641-udp and denying the rest — careful not to lock out SSH). Until then,
+> rely on the Tailscale-Serve URL for access and treat the pairing blob as the gate.
+
+**One-time setup on the host:**
+
+1. **Enable Tailscale Serve tailnet-wide** (admin console → DNS / Access Controls). Until you
+   do, `tailscale serve` errors with `Serve is not enabled on your tailnet` and prints a
+   deep-link (`https://login.tailscale.com/f/serve?node=…`) to enable it.
+2. **Point Serve at the local port — use `127.0.0.1`, not `localhost`:**
+   ```bash
+   tailscale serve --bg --https=443 http://127.0.0.1:6768
+   ```
+   `--bg` makes it persistent across `tailscaled`/host restarts. ⚠️ `localhost` resolves to
+   IPv6 `::1` first and Orca listens on **IPv4 only** (`0.0.0.0:6768`), so
+   `http://localhost:6768` returns **502 Bad Gateway**. Always use `http://127.0.0.1:6768`.
+   (`tailscale serve status` to view; `tailscale serve --reset` to clear.)
+3. **Set `ORCA_PAIRING_ADDRESS=wss://<node>.<tailnet>.ts.net`** (no port — Serve is on 443).
+   This is mandatory for any HTTPS front: Orca bakes this into the pairing blob as the WS
+   endpoint, and an HTTPS page opening a plain `ws://` socket is **mixed-content-blocked**
+   (the UI hangs — same failure mode as basic auth on a public domain). Orca accepts a full
+   `wss://host` URL and advertises it with no `:6768` appended.
+4. **Restart via Coolify** (`POST /applications/<uuid>/restart`) so Orca recreates with the
+   new env var and reprints a `Web client URL` whose blob's `endpoint` is `wss://…`.
+
+Then on any Tailscale-connected device, open the **Orca Web** client:
+
+1. Get the `Web client URL` the server printed (Coolify API or `docker logs`):
+   ```bash
+   curl -H "Authorization: Bearer <token>" \
+     "https://<coolify>/api/v1/applications/<app-uuid>/logs" \
+     | jq -r '.logs' | grep -oE 'https://<node>\.<tailnet>\.ts\.net/web-index.html#pairing=[A-Za-z0-9%._-]+' | tail -1
+   # or over SSH:  docker logs <container> 2>&1 | grep "Web client URL"
+   ```
+2. Open that URL in a browser on a Tailscale-connected device — the `#pairing=…` fragment
+   auto-pairs the web client (no pasting). After the first pair, **bookmark the bare URL**
+   `https://<node>.<tailnet>.ts.net/` — the paired device token persists in the `/home/orca`
+   volume, so the bare URL reconnects on every visit, across restarts and redeploys.
+
+> **Fallback (plain tailnet IP, no Serve):** if Serve is ever reset, the instance is still
+> reachable at `http://<tailscale-ip>:6768/` (set `ORCA_PAIRING_ADDRESS` back to the IP).
+> That `http` is end-to-end encrypted by Tailscale (WireGuard), so the missing TLS is
+> cosmetic — the `http` is only the last hop inside an already-encrypted tunnel. Tailnet
+> membership is the access gate; the pairing blob is the use gate.
+
+> Requires Tailscale running on the client device, and no conflicting VPN (a system VPN can
+> black-hole the Tailscale route and make the URL time out — disable it if the page won't
+> load).
+
+### Alternative: SSH local-forward tunnel (loopback model)
+
+If you can't use Tailscale, set `ORCA_PAIRING_ADDRESS=127.0.0.1` and forward the port:
 
 ```bash
 ssh -i ./id_ed25519 -N -L 6768:127.0.0.1:6768 root@<host-ip>
 ```
 
-(`-N` = no shell, `-L` = forward the client's `localhost:6768` to the host's `127.0.0.1:6768`.)
+Then open `http://localhost:6768/web-index.html#pairing=…` (grab the `Web client URL` from
+`docker logs`, substituting `127.0.0.1`→`localhost`). This is the original documented model;
+the Tailscale model above is just the same thing without the tunnel.
 
-Then connect the **Orca Web** client. The Web UI's landing page is a "Connect to Orca —
-paste a pairing URL" page, so you need the pairing data the server printed. Easiest path:
+### Alternative: public domain (no basic auth)
 
-1. Get the `Web client URL` / `Pairing URL` the server printed:
-   ```bash
-   ssh -i ./id_ed25519 root@<host-ip> \
-     'docker logs <container> 2>&1 | grep -E "Web client URL|Pairing URL"'
-   ```
-2. **Either** open the `Web client URL` in your browser with `127.0.0.1`→`localhost`
-   (pairing code is embedded in the URL fragment, so it auto-pairs):
-   ```
-   http://localhost:6768/web-index.html#pairing=orca%3A%2F%2Fpair%3Fcode%3D…
-   ```
-   **Or** open `http://localhost:6768/` and paste the `Pairing URL`
-   (`orca://pair?code=…`) into the "Orca Server" box, then click **Connect**.
+A public `https://<domain>/` works if you set `ORCA_PAIRING_ADDRESS=wss://<domain>` — Orca
+accepts a full `wss://host` URL as the pairing address (verified: it advertises
+`wss://<domain>` with no `:6768` appended). Coolify auto-provisions the Let's Encrypt cert
+via Traefik. The pairing blob is the only gate, so the connect page is public but useless
+without a fresh pairing URL.
 
-`--serve-pairing-address 127.0.0.1` makes the endpoint encoded inside the pairing URL match
-the tunnel's `127.0.0.1:6768`. Override it with the `ORCA_PAIRING_ADDRESS` env var if you
-switch to a different reachability model (e.g. a Tailscale IP, where you'd set it to the
-host's Tailscale address and reach 6768 over the Tailscale network instead of an SSH
-tunnel). Desktop/mobile-app native pairing needs a reachable non-loopback advertised
-address; under the loopback-tunnel model the browser Web UI is the supported client.
+> ⚠️ **Do NOT put Coolify HTTP basic auth on an Orca public domain.** The Web client is an
+> SPA (`web-index.html` → `./assets/web-index-*.js`) that opens `new WebSocket(wss://…)`.
+> Browsers do **not** send cached basic-auth credentials on a JS-initiated WebSocket and do
+> not prompt for WS auth, so the WS upgrade gets `401` from Traefik and fails silently — the
+> UI hangs forever on "loading". (A curl with explicit `-u` creds returns `101`, which is
+> misleading — the browser can't do that.) If you need real auth on a public domain, use a
+> **cookie-based forward-auth** proxy (OAuth2 Proxy / Authelia / Cloudflare Access): a
+> session cookie *is* sent on the WebSocket upgrade, so unlike basic auth it works.
+
+### A domain name without public exposure
+
+The Tailscale Serve model above **is** this — a real `*.ts.net` domain with a real cert that
+stays tailnet-only, no security downgrade, no auth needed. There's nothing extra to set up.
 
 ## Coolify setup (step-by-step)
 
@@ -244,8 +366,10 @@ address; under the loopback-tunnel model the browser Web UI is the supported cli
    one-time manual UI step. Without it the pairing token rotates on every redeploy and
    saved browser connections break.
 
-5. **Environment variables:** add `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` (mark secret).
-   See [Environment variables](#environment-variables).
+5. **Environment variables:** add the Claude Code / Codex auth vars and
+   `ORCA_PAIRING_ADDRESS`. Production wires Claude Code to **Ollama Cloud** (an
+   Anthropic-compatible endpoint) rather than Anthropic — see
+   [Environment variables](#environment-variables).
 
 6. **Deploy.** Do not enable auto-deploy until the first deploy is verified.
 
@@ -253,10 +377,58 @@ address; under the loopback-tunnel model the browser Web UI is the supported cli
 
 | Variable | Scope | Purpose |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | runtime, secret | Authenticates the Claude Code CLI. |
-| `OPENAI_API_KEY` | runtime, secret | Authenticates the Codex CLI. |
-| `ORCA_PAIRING_ADDRESS` | runtime, optional | Address advertised inside the pairing URL. Defaults to `127.0.0.1` (matches the SSH tunnel). |
+| `ORCA_PAIRING_ADDRESS` | runtime | Address baked into the pairing blob as the WS endpoint. `127.0.0.1` (SSH tunnel), the host's Tailscale IP (plain tailnet fallback), `wss://<node>.<tailnet>.ts.net` (**Tailscale Serve — production**), or `wss://<domain>` (public). |
+| `ORCA_MOBILE_PAIRING` | runtime | Any non-empty value → **mobile** scope (native apps; `repo.add` blocked). Unset/empty → **runtime** scope (browser Web UI; production default). `${VAR:+…}` means `"0"` still enables it — delete the var to disable. |
+| `ANTHROPIC_BASE_URL` | runtime | Claude Code backend. Production: `https://ollama.com` (Ollama Cloud's Anthropic-compatible endpoint — no `ollama` binary/daemon needed). |
+| `ANTHROPIC_AUTH_TOKEN` | runtime, secret | Bearer token for the backend. For Ollama Cloud, your `OLLAMA_API_KEY` (ollama.com authenticates via `Authorization: Bearer`, not `x-api-key`). |
+| `ANTHROPIC_MODEL` | runtime | Fallback model when no tier-specific slot applies. Production: `glm-5.2:cloud` (matches the Opus/main model). |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` / `_SONNET_MODEL` / `_HAIKU_MODEL` | runtime | Per-tier overrides (Opus = main loop, Sonnet = general, Haiku = fast background). They do **not** have to be the same model — per-tier routing with different `:cloud` models works (verified; see note below). Each slot must be set to a tag the backend accepts, or Claude Code errors "model not found". Production: Opus=`glm-5.2:cloud`, Sonnet=`kimi-k2.7-code:cloud`, Haiku=`gemma4:31b-cloud`. |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | runtime | Model for Task-tool subagents. **Unset it to make subagents inherit the main session model** (dynamic — follows whatever the main loop runs). Set it explicitly only as a failsafe (see note below). Production: **unset** (subagents inherit `glm-5.2:cloud`). |
+| `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` / `_DISABLE_NONESSENTIAL_TRAFFIC` | runtime | Set both to `1` to keep Claude Code quiet against a non-Anthropic backend. |
+| `OPENAI_API_KEY` | runtime, secret | Authenticates the Codex CLI (if used). |
 | `ORCA_VERSION` | **build-time `ARG`**, not env | Pin the Orca release, e.g. `--build-arg ORCA_VERSION=v1.4.150`. Defaults to `latest`. |
+
+> **Ollama Cloud wiring (production):** Claude Code (the CLI Orca spawns) is pointed at
+> Ollama Cloud, not Anthropic, via the `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` /
+> `ANTHROPIC_MODEL*` vars above. Orca's agent PTY inherits container env, so this works with
+> the normal **Claude** agent (do **not** use the "claude-teams" agent variant — its env
+> allowlist drops `ANTHROPIC_BASE_URL`). No `ollama` binary or daemon is installed; the
+> `ollama launch claude` command does not exist in the container.
+>
+> **Per-tier routing (verified 2026-07-23):** the three `ANTHROPIC_DEFAULT_*_MODEL` slots can
+> hold *different* `:cloud` models simultaneously — Claude Code routes each tier to its own
+> model. (An earlier version of this README claimed all three must be the same model or
+> Claude Code errors "model not found"; that was a misdiagnosis — the error actually comes
+> from an *invalid tag*, e.g. a local-only `gemma4:latest` instead of a cloud `gemma4:31b-cloud`.
+> Every slot must be set to a tag the backend accepts, but they need not match.) Validate a
+> tag before deploying it:
+> ```bash
+> curl -s -o /dev/null -w "%{http_code}\n" https://ollama.com/v1/messages \
+>   -H "Authorization: Bearer $OLLAMA_API_KEY" -H "content-type: application/json" \
+>   -H "anthropic-version: 2023-06-01" \
+>   -d '{"model":"<tag>","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}'
+> # expect 200
+> ```
+> Verified-valid Ollama Cloud tags: `glm-5.2:cloud`, `kimi-k2.7-code:cloud`, `gemma4:31b-cloud`
+> (also `gemma4:cloud`, `gemma4:31b`), `deepseek-v4-pro:cloud`, `deepseek-v4-flash:cloud`,
+> `kimi-k2.6:cloud`, `glm-5.1:cloud`, `qwen3.5:cloud`, `qwen3-coder:480b-cloud`,
+> `minimax-m2.7:cloud`. GLM/DeepSeek/Kimi are reasoning models (emit a `thinking` block);
+> Gemma4 returns plain text — fine for the fast Haiku tier.
+>
+> **Subagents inherit the main model when `CLAUDE_CODE_SUBAGENT_MODEL` is unset** (resolution
+> order: env var → per-invocation `model` param → subagent `model:` frontmatter → main session
+> model). The built-in subagents (Explore/Plan/general-purpose) use `model: inherit` and are
+> safe. ⚠️ A *custom* subagent with `model: sonnet`/`haiku`/`opus`/`fable` frontmatter resolves
+> to a built-in Anthropic model ID and will 404 "model not found" on a non-Anthropic backend —
+> `CLAUDE_CODE_SUBAGENT_MODEL=inherit` does **not** shield against this (it still falls through
+> to the frontmatter). Give custom subagents `model: inherit` (or a full `:cloud` ID), or set
+> `CLAUDE_CODE_SUBAGENT_MODEL=<:cloud id>` as a blanket failsafe (which pins subagents to one
+> model — no dynamic inheritance).
+>
+> Env-var changes need a Coolify restart/redeploy to take effect — `POST /applications/<uuid>/restart`
+> queues a `restart_only` deployment that recreates the container with the new env (~1–2 min).
+> Fallback if a model's tool-call quirks bite: swap that slot's var to `qwen3-coder:480b-cloud`
+> (or back to `glm-5.2:cloud`) and restart.
 
 ## First run / verification
 
@@ -276,15 +448,27 @@ address; under the loopback-tunnel model the browser Web UI is the supported cli
      'docker logs <container> 2>&1 | grep -E "Orca server ready|Web client URL|Pairing URL"'
    ```
    If those lines are absent, see the first row of [Troubleshooting](#troubleshooting).
-4. **Use it:** open the SSH tunnel (above), extract the `Web client URL` from the logs,
-   and open it in your browser with `127.0.0.1`→`localhost` (see
-   [Reachability](#reachability-private-only)). The Orca Web UI should load and pair
-   automatically.
+4. **Use it:** extract the `Web client URL` from the logs and open it in a browser on a
+   Tailscale-connected device (production model — see [Reachability](#reachability)), or over
+   the SSH tunnel with `127.0.0.1`→`localhost`. The Orca Web UI should load and pair
+   automatically; bookmark the bare URL for subsequent visits.
 5. **Agent smoke test:** from the Web UI, run a trivial task with Claude Code and one with
    Codex to confirm both CLIs are present and authenticated.
 6. **Persistence check:** trigger a redeploy and confirm the Web UI still recognizes the
    session afterward (proves the `/home/orca` volume is working and the pairing token did
    not rotate).
+7. **Tailscale Serve check (production):** once Serve is configured, from a tailnet device
+   confirm the HTTPS front and the wss upgrade:
+   ```bash
+   curl -sS -o /dev/null -w "%{http_code} ssl=%{ssl_verify_result}\n" https://<node>.<tailnet>.ts.net/
+   # expect: 200 ssl=0   (valid cert)
+   curl -sS -i --http1.1 -H "Connection: Upgrade" -H "Upgrade: websocket" \
+     -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+     https://<node>.<tailnet>.ts.net/ | head -1
+   # expect: HTTP/1.1 101 Switching Protocols
+   ```
+   A 502 means Serve is pointed at `localhost` instead of `127.0.0.1` (see
+   [Troubleshooting](#troubleshooting)).
 
 ## Persistent storage
 
@@ -326,6 +510,7 @@ replacement, so a pinned image can still read existing state after an upgrade.
 | --- | --- | --- |
 | No `Orca server ready` / `Pairing URL` in `docker logs`, but `:6768` returns HTTP 200 | Passed the CLI subcommand form (`serve --port … --pairing-address …`) to `AppRun`, which execs Electron directly — so `isServeMode` was false and the app opened its GUI window on Xvfb instead of entering serve mode. The WS server still starts (HTTP 200) but `printServeReady` never runs. | Pass Electron-format flags directly: `--serve --serve-port 6768 --serve-pairing-address 127.0.0.1`. |
 | `Unauthorized. Pair this web client again.` when pasting a pairing URL | The URL was hand-built using the `authToken` from `orca-runtime.json` (the runtime session token), not a real pairing invite token. | Use the `Pairing URL` the server printed to `docker logs` (its `deviceToken` comes from the device registry). Don't hand-build pairing URLs. |
+| Browser shows `This site can't be reached / ERR_CONNECTION_REFUSED / "localhost refused to connect"` | You opened a stale `http://localhost:6768` (or `127.0.0.1:6768`) URL/bookmark from the SSH-tunnel model with **no SSH tunnel running** — the address bar points at your own machine, where nothing listens. (An in-page `new WebSocket(...)` failure can't produce this Chrome net-error page; it strictly means a top-level localhost navigation, not a server bug.) | Use the production URL `https://<node>.<tailnet>.ts.net/` on a Tailscale-connected device — open the `#pairing=…` Web client URL from `docker logs` once to auto-pair, then bookmark the bare URL. **Delete the stale `localhost:6768` bookmark.** See [Reachability](#reachability). |
 | Container exits **126** | Missing Electron/Chromium shared libs on the minimal base. | Ensure the full lib list in the Dockerfile's `apt-get install` is present. |
 | Container exits **127**, `/orca-ide: No such file or directory` | `APPDIR` not set; `AppRun` can't resolve `$APPDIR/orca-ide`. | `export APPDIR=/opt/orca/squashfs-root` (done in the entrypoint). |
 | **Segfault (139)**, "Missing X server or $DISPLAY" | Orca's auto-Xvfb did not start in the container. | Wrap the launch in `xvfb-run -a` (done in the entrypoint). |
@@ -334,6 +519,10 @@ replacement, so a pinned image can still read existing state after an upgrade.
 | Coolify logs API returns `400 "Application is not running"` | The container has already exited, and the API only serves running containers. | The entrypoint keeps the container alive briefly after an exit (`sleep 60`) so logs are capturable; or inspect via SSH `docker logs`. |
 | Port 6768 not published / no mounts despite `custom_docker_run_options` | `custom_docker_run_options` is ignored for Dockerfile apps. | Use `ports_mappings` (API) for the port and the Coolify UI for the volume. |
 | Saved browser connection breaks after every redeploy | Pairing token rotates on each container start because `~/.config/orca` isn't persisted. | Mount a persistent volume at `/home/orca` (see [Persistent storage](#persistent-storage)). |
+| Tailscale Serve returns **502 Bad Gateway** | Serve proxied to `http://localhost:6768`, and `localhost` resolves to IPv6 `::1` while Orca listens on IPv4 only (`0.0.0.0:6768`) — the IPv6 path resets. | Point Serve at explicit IPv4: `tailscale serve --bg --https=443 http://127.0.0.1:6768`. |
+| `tailscale serve` errors `Serve is not enabled on your tailnet` | The Serve feature is tailnet-wide and off by default. | Open the deep-link the CLI prints (`https://login.tailscale.com/f/serve?node=…`) and enable it, then retry. |
+| HTTPS page loads but the Web UI hangs on "loading" | `ORCA_PAIRING_ADDRESS` is still an IP / `ws://…`, so the HTTPS page opens a plain `ws://` socket → mixed-content block. | Set `ORCA_PAIRING_ADDRESS=wss://<node>.<tailnet>.ts.net` and restart via Coolify. |
+| Claude Code shows a permission / "can't auto-update" notice in the Orca terminal; `npm install -g …@latest` fails with permission denied | The CLIs were `npm install -g`'d as root into the default global prefix, which is root-owned — the non-root `orca` user can't write to it, so Claude Code's auto-updater fails at startup. | Fixed in the Dockerfile: the CLIs are installed as `orca` into a user-owned prefix (`/opt/node-global` via `NPM_CONFIG_PREFIX`). After a rebuild/redeploy, `which claude` → `/opt/node-global/bin/claude` and `npm install -g @anthropic-ai/claude-code@latest` works from the Orca terminal. |
 
 **Reading logs:**
 - Coolify API: `GET /api/v1/applications/<uuid>/logs` → returns `{"logs": "<string>"}` (not
@@ -343,26 +532,39 @@ replacement, so a pinned image can still read existing state after an upgrade.
 
 ## Security notes
 
-- **No TLS on 6768.** Traffic is encrypted by the SSH tunnel. Do not expose 6768 publicly.
+- **TLS.** With Tailscale Serve (production) the `https://<node>.<tailnet>.ts.net` URL has a
+  real, browser-trusted cert — full TLS to the browser. The plain tailnet-IP fallback
+  (`http://<ip>:6768`) has no TLS but is end-to-end encrypted by Tailscale (WireGuard), so the
+  missing TLS is cosmetic (the `http` is only the last hop inside an already-encrypted tunnel);
+  same for the SSH-tunnel model. Do not expose 6768 to the public internet without an encrypted
+  transport in front of it.
 - **Non-root runtime.** The `orca` user (UID 1000) runs the server.
-- **Secrets.** `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` are stored as Coolify env vars (mark
-  secret / not exposed). The `authToken` in `orca-runtime.json` is a secret too — don't
-  expose it.
+- **Secrets.** `ANTHROPIC_AUTH_TOKEN` / `OPENAI_API_KEY` are stored as Coolify env vars
+  (mark secret / not exposed). The `authToken` in `orca-runtime.json` is a secret too —
+  don't expose it.
 - **Pairing URLs are credentials.** The `Pairing URL` and `Web client URL` embed the
   device-registry `deviceToken` as base64 (reversible). Treat them like a password — don't
-  post them publicly or commit them. They're only useful to someone who can also reach your
-  loopback tunnel, so the practical exposure is low, but a leaked URL lets a third party pair
-  their own browser to your server until you redeploy (which mints a new token) or revoke.
-- **Firewall.** The host firewall blocks 6768 externally; only the SSH tunnel reaches it.
+  post them publicly or commit them. A leaked URL lets a third party pair their own browser
+  to your server until you redeploy (which mints a new token) or revoke. In the Tailscale
+  model a leaked URL is only useful to someone also on your tailnet; on a public domain it's
+  useful to anyone on the internet — keep that difference in mind.
+- **Firewall.** On the pre-2026-07-23 host, a Hetzner Cloud firewall blocked 6768 externally
+  so only the tailnet (or SSH tunnel) reached it. The current (post-migration) host has **no
+  cloud firewall**, so `6768` is publicly exposed on the host IP until a firewall is applied —
+  see the caveat in [Reachability → Production model](#production-model-tailscale-serve-https-tailnet-only).
+  The Tailscale-Serve URL itself stays tailnet-only; treat the pairing blob as the real gate.
+- **Don't use Coolify basic auth on an Orca domain.** It breaks the browser WebSocket (see
+  [Reachability → public domain](#alternative-public-domain-no-basic-auth)). Use a
+  cookie-based forward-auth proxy instead, or stay on the Tailscale model.
 
 ## Known limitations
 
 - Agent auth is **API-key only** in a headless container; interactive OAuth/subscription
   login is impractical here.
-- **Phone-app (mobile) pairing is not enabled.** It needs `--serve-mobile-pairing` plus an
-  Orca account sign-in that a headless server cannot easily perform (the mobile QR is an
-  in-app, signed-in flow). Browser Web UI pairing (runtime scope, no account) is what this
-  build supports.
+- **Mobile (native app) scope is sandboxed.** It works without an Orca account on the
+  server, but mobile-scope clients cannot add projects (`repo.add` is rejected). Production
+  runs **runtime scope** (browser Web UI, full permissions, no account) for that reason.
+  Switch scopes by setting/deleting `ORCA_MOBILE_PAIRING` and redeploying.
 - **Pairing token rotates per redeploy until `/home/orca` is persisted**, so saved browser
   connections break on each redeploy. Mount the volume (see [Persistent storage](#persistent-storage)).
 - The headless docs on `main` may describe behavior ahead of the v1.4.150 release; always
@@ -373,7 +575,7 @@ replacement, so a pinned image can still read existing state after an upgrade.
 | File | Purpose |
 | --- | --- |
 | [Dockerfile](Dockerfile) | The image: base, deps + Electron libs, Node + agent CLIs, AppImage download/extract, `orca` user, entrypoint. |
-| [entrypoint.sh](entrypoint.sh) | Starts Xvfb and runs `AppRun --no-sandbox --serve --serve-port 6768 --serve-pairing-address 127.0.0.1`. |
+| [entrypoint.sh](entrypoint.sh) | Starts Xvfb and runs `AppRun --no-sandbox --serve --serve-port 6768 --serve-pairing-address "${ORCA_PAIRING_ADDRESS:-127.0.0.1}" ${ORCA_MOBILE_PAIRING:+--serve-mobile-pairing}`. |
 | [README.md](README.md) | This document. |
 | [.gitattributes](.gitattributes) | Forces LF line endings for `entrypoint.sh` and `Dockerfile`. |
 
