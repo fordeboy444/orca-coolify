@@ -105,14 +105,19 @@ The [Dockerfile](Dockerfile) is layered as follows:
    **owned by `orca`**. Authenticated at runtime via API-key env vars (see
    [Environment variables](#environment-variables)).
    - **Why user-owned:** the container runs as the unprivileged `orca` user (no sudo). A
-     root-owned global npm install left Claude Code's auto-updater unable to write to the
-     global dir, so it printed a "npm global directory isn't writable" permission notice at
-     startup and `npm install -g …@latest` failed from the Orca terminal. The user-owned
-     prefix fixes both: auto-update works, and you can update manually from the Orca
-     terminal with `npm install -g @anthropic-ai/claude-code@latest`.
+     root-owned global npm install left the global dir unwritable by `orca`, so Claude Code
+     printed a "npm global directory isn't writable" permission notice at startup
+     (`claude doctor`: "Last update attempt: failed (no_permissions)") and
+     `npm install -g …@latest` failed from the Orca terminal. The user-owned prefix fixes
+     this: `npm install -g …@latest` (and `claude update`) now run cleanly as `orca`.
+   - **Auto-updates are OFF in this image** (`claude doctor`: "Auto-updates: disabled (set
+     by env: `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`)") — that env var is set to keep
+     Claude Code quiet against the non-Anthropic (Ollama Cloud) backend. So Claude Code
+     never updates itself here; update it manually (see [Updating the agent CLIs](#updating-the-agent-clis)).
    - **Redeploy behavior:** CLI updates write to `/opt/node-global` (the container's
-     writable layer), so a redeploy resets the CLIs to this build-pinned version and then
-     auto-updates forward. Settings/auth live on the `/home/orca` volume and are unaffected.
+     writable layer, NOT the `/home/orca` volume), so a redeploy resets the CLIs to this
+     build-pinned version. Because auto-updates are off, they stay at that version until
+     you update manually. Settings/auth live on the `/home/orca` volume and are unaffected.
 
 6. **Orca AppImage (back to root):** `USER root`, then the AppImage is downloaded from the
    GitHub release (latest by default, or a pinned `ORCA_VERSION`), `--appimage-extract` once
@@ -121,6 +126,35 @@ The [Dockerfile](Dockerfile) is layered as follows:
 
 7. **Drop to `orca` for runtime:** `WORKDIR /home/orca`, `EXPOSE 6768`, `USER orca`,
    `ENTRYPOINT ["/entrypoint.sh"]`.
+
+## Updating the agent CLIs
+
+There is **no Orca UI button** to update Claude Code or Codex — Orca just spawns the CLIs,
+and in this image their auto-updaters are disabled (see step 5 above). To update either,
+open a terminal in the Orca Web UI and run, as the `orca` user:
+
+```bash
+claude --version                                    # current version
+npm install -g @anthropic-ai/claude-code@latest     # update Claude Code
+npm install -g @openai/codex@latest                 # update Codex (if used)
+claude --version                                    # confirm the new version
+```
+
+These succeed without sudo because the CLIs live in the user-owned `/opt/node-global`
+prefix (`NPM_CONFIG_PREFIX`). `claude doctor` prints "No installation issues found" on a
+healthy install; a "Last update attempt: failed (no_permissions)" line is stale history
+from the pre-fix root-owned install and clears after a successful update.
+
+> ⚠️ **Re-run after every redeploy.** `/opt/node-global` is on the container's writable
+> layer (not the persisted `/home/orca` volume), so a Coolify redeploy resets the CLIs to
+> the version baked into the image, and with auto-updates off nothing brings them forward.
+> Re-run the `npm install -g …@latest` commands above after each redeploy to get current.
+> Claude Code settings/auth live on the volume and are unaffected.
+
+Verified 2026-07-24 after the user-owned-prefix rebuild: `which claude` →
+`/opt/node-global/bin/claude`, `ls -ld /opt/node-global` owned by `orca:orca`,
+`claude --version` → `2.1.218`, `claude doctor` → "No installation issues found", and
+`npm install -g @anthropic-ai/claude-code@latest` completed with no permission error.
 
 ## Headless build gotchas
 
@@ -384,7 +418,7 @@ stays tailnet-only, no security downgrade, no auth needed. There's nothing extra
 | `ANTHROPIC_MODEL` | runtime | Fallback model when no tier-specific slot applies. Production: `glm-5.2:cloud` (matches the Opus/main model). |
 | `ANTHROPIC_DEFAULT_OPUS_MODEL` / `_SONNET_MODEL` / `_HAIKU_MODEL` | runtime | Per-tier overrides (Opus = main loop, Sonnet = general, Haiku = fast background). They do **not** have to be the same model — per-tier routing with different `:cloud` models works (verified; see note below). Each slot must be set to a tag the backend accepts, or Claude Code errors "model not found". Production: Opus=`glm-5.2:cloud`, Sonnet=`kimi-k2.7-code:cloud`, Haiku=`gemma4:31b-cloud`. |
 | `CLAUDE_CODE_SUBAGENT_MODEL` | runtime | Model for Task-tool subagents. **Unset it to make subagents inherit the main session model** (dynamic — follows whatever the main loop runs). Set it explicitly only as a failsafe (see note below). Production: **unset** (subagents inherit `glm-5.2:cloud`). |
-| `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` / `_DISABLE_NONESSENTIAL_TRAFFIC` | runtime | Set both to `1` to keep Claude Code quiet against a non-Anthropic backend. |
+| `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` / `_DISABLE_NONESSENTIAL_TRAFFIC` | runtime | Set both to `1` to keep Claude Code quiet against a non-Anthropic backend. ⚠️ `_DISABLE_NONESSENTIAL_TRAFFIC` also disables Claude Code's auto-updater (`claude doctor`: "Auto-updates: disabled"), so update the CLI manually (see [Updating the agent CLIs](#updating-the-agent-clis)). |
 | `OPENAI_API_KEY` | runtime, secret | Authenticates the Codex CLI (if used). |
 | `ORCA_VERSION` | **build-time `ARG`**, not env | Pin the Orca release, e.g. `--build-arg ORCA_VERSION=v1.4.150`. Defaults to `latest`. |
 
