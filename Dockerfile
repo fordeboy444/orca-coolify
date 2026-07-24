@@ -33,14 +33,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libxext6 libxres1 fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
-# Node 20 LTS — needed to install the coding-agent CLIs (Claude Code, Codex).
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+# Node 22 LTS — the @anthropic-ai/claude-code npm package has required Node 22+
+# since v2.1.198. Needed to install the coding-agent CLIs (Claude Code, Codex).
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
-# Coding-agent CLIs that Orca will launch inside the container.
-# Auth via API keys passed as env vars (ANTHROPIC_API_KEY / OPENAI_API_KEY).
+# Non-root runtime user, created before the CLI install so the CLIs can be
+# installed into a directory `orca` owns. State lives in /home/orca/.config —
+# mount a persistent volume there in Coolify so pairing + agent auth survive
+# redeployments.
+RUN useradd -m -s /bin/bash orca \
+    && mkdir -p /opt/node-global \
+    && chown -R orca:orca /opt/node-global
+
+# Install the coding-agent CLIs into a USER-OWNED npm prefix so the `orca` user
+# (which has no sudo) can auto-update and run `npm install -g ...@latest` itself.
+# The previous `npm install -g` ran as root into the default global prefix, leaving
+# it root-owned — so Claude Code's auto-updater failed at startup with a permission
+# error ("npm global directory isn't writable"). NPM_CONFIG_PREFIX + PATH are set
+# as image ENV so Orca and the `claude`/`codex` processes it spawns all resolve to
+# this prefix. Auth for both CLIs is via API-key env vars (ANTHROPIC_API_KEY /
+# OPENAI_API_KEY). NOTE: updates land in /opt/node-global (container writable
+# layer) and reset to this build-pinned version on redeploy, then auto-update
+# forward; settings/auth on the /home/orca volume are unaffected.
+ENV NPM_CONFIG_PREFIX=/opt/node-global
+ENV PATH=/opt/node-global/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+USER orca
 RUN npm install -g @anthropic-ai/claude-code @openai/codex
+
+# AppImage download/extract needs root (/opt/orca, curl, chmod). Switch back to
+# root for this block, then drop to `orca` for runtime at the end.
+USER root
 
 # Orca AppImage — download the latest release and extract once (no FUSE at runtime).
 # To pin a release for reproducibility, set ORCA_VERSION at build time, e.g.:
@@ -59,10 +83,6 @@ RUN mkdir -p /opt/orca \
     && rm /opt/orca/orca-linux.AppImage \
     && chmod -R a+rX /opt/orca/squashfs-root \
     && chmod a+rx /opt/orca/squashfs-root/AppRun
-
-# Non-root runtime user. State lives in /home/orca/.config — mount a persistent
-# volume there in Coolify so pairing + agent auth survive redeployments.
-RUN useradd -m -s /bin/bash orca
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
