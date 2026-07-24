@@ -66,6 +66,15 @@ RUN npm install -g @anthropic-ai/claude-code @openai/codex
 # root for this block, then drop to `orca` for runtime at the end.
 USER root
 
+# Grant the non-root `orca` user passwordless sudo so CLIs can be installed at runtime
+# from the Orca Web UI terminal. NOTE: runtime installs live on the container writable
+# layer and are reset on every Coolify redeploy (same as the agent CLIs in /opt/node-global
+# — see README "Re-run after every redeploy"). For tools you want permanent, bake them
+# into this Dockerfile instead of installing at runtime.
+RUN apt-get update && apt-get install -y --no-install-recommends sudo \
+    && echo "orca ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers \
+    && rm -rf /var/lib/apt/lists/*
+
 # Orca AppImage — download the latest release and extract once (no FUSE at runtime).
 # To pin a release for reproducibility, set ORCA_VERSION at build time, e.g.:
 #   --build-arg ORCA_VERSION=v0.x.y
