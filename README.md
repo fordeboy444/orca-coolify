@@ -8,8 +8,13 @@ with Xvfb + `LIBGL_ALWAYS_SOFTWARE=1`, mirroring Orca's
 It pre-installs the **Claude Code** and **Codex** CLIs so Orca can spawn coding agents inside
 the container.
 
-> **Pinned release:** Orca **v1.4.150**. See [Pinning & upgrading](#pinning--upgrading-the-orca-version)
-> for why the version matters and how to change it.
+> **Version:** the Dockerfile builds with `ORCA_VERSION=latest` (see
+> [Pinning & upgrading](#pinning--upgrading-the-orca-version)), so the live runtime tracks
+> whatever Orca release was current at the last rebuild — **v1.4.159 as of 2026-07-27**, not a
+> fixed pin. The `v1.4.150` references below (pairing-banner format, headless-guide link) are the
+> version this README was originally written against and remain substantially accurate; verify
+> against the tagged docs for your actual runtime version with
+> `docker exec --user orca <container> orca-ide status --json | jq -r .result.runtime.appVersion`.
 
 ---
 
@@ -738,13 +743,72 @@ replacement, so a pinned image can still read existing state after an upgrade.
 | Need to install a CLI/package from the Orca terminal | The container runs as non-root `orca`; system-package installs need root. | `sudo apt-get install -y <pkg>` works (the `orca` user has passwordless sudo). The install resets on the next redeploy. For a tool you want **permanent** without a rebuild, install it under `/home/orca` (`~/.npm-global` for npm globals, `~/.local/bin` for standalone binaries) so it survives redeploy — see [Persistent user-installed CLIs](#persistent-user-installed-clis-survive-redeploy-no-rebuild). |
 | The Web UI phone-pairing screen says **"Orca relay unavailable"** | The Orca Relay ("Anywhere") mobile-pairing path requires the server to be signed into an Orca account; this headless deployment has none. | Use the **Local network** path instead — see [Pairing the Orca Mobile phone app](#pairing-the-orca-mobile-phone-app-native-mobile-client). |
 | Web UI mobile-pairing **"Local network"** says **"WebSocket transport is not running"** | `ORCA_PAIRING_ADDRESS` is `wss://…` (production), but Local network expects a plain `ws://<ip>:6768` endpoint; flipping the address to the IP would break the HTTPS Web UI via mixed content. | Don't use the Web UI QR — paste the server-emitted `orca://pair?code=…` URL from `docker logs` into Orca Mobile's Pair → paste link. See [Pairing the Orca Mobile phone app](#pairing-the-orca-mobile-phone-app-native-mobile-client). |
-| Web UI **Settings → Orca CLI** says **"CLI registration is managed on the Orca server, not in the web browser"**, and the **terminal pane hangs at "starting terminal"** (spinner, never resolves) | Two separate things. (1) The "CLI registration" message is **informational, not an error** — "CLI registration" = putting the `orca` shell command on `PATH`; a browser can't write the server's filesystem, so the Web UI renders that toggle read-only. It is **already done** server-side: `~/.local/bin/orca-ide` (CliInstaller symlink) and `~/.local/bin/orca` (wrapper) exist in the persistent `orca-home` volume, `orca serve` auto-installs them on startup (log line: `[serve] orca CLI install: installed (/home/orca/.local/bin/orca-ide)`), and `orca status` reports `runtimeState: ready`. (2) The **"starting terminal" hang is a separate, unresolved symptom**. Investigated 2026-07-24 against the live container (`krno4lok…`): the **backend is healthy** — the Orca daemon has live interactive bash sessions on `pts/0`/`pts/1`, each running `bash --rcfile ~/.config/orca/shell-ready/bash/rcfile`, and reading `/proc/<pid>/environ` shows `orca` **is** on PATH inside them (the rcfile sources `~/.profile`, which adds `~/.local/bin`) — with no terminal/pty/spawn errors in the daemon log. **Yet the UI terminal still does not visibly come up.** Root cause not yet identified; it may be an Orca frontend/WebSocket display issue (backend shell spawned but the frontend stays on the spinner), or the user may be opening **Coolify's container-terminal button** (a separate Coolify exec widget) rather than the Orca Web UI's own pane — the two have different root causes and were not disambiguated. | **Nothing to do for CLI registration** — it is already done; confirm with `docker exec --user orca <container> bash -lc 'orca status'`. The "starting terminal" hang is **not fixed** by this investigation — backend verified healthy but the UI symptom persisted as of 2026-07-24. To pursue: first determine *which* terminal is hanging (the Orca Web UI pane vs. Coolify's container-terminal button), then investigate that path's WebSocket/exec layer. If you ever want a CLI fallback that survives a **volume wipe**, bake a symlink into the Dockerfile at `/usr/local/bin/orca` → `/opt/orca/squashfs-root/resources/bin/orca-ide` (**not** under `/home/orca` — the volume mount hides image contents there), then rebuild/redeploy. |
+| Web client can't open a project, or the **terminal pane hangs at "starting terminal"**, or error **"Local PTYs are unavailable in the web client"** | All the same upstream bug: [stablyai/orca#9047](https://github.com/stablyai/orca/issues/9047) (still **open**). Server worktrees are tagged `hostId:"local"`; Orca resolves their PTY/filesystem operation owner via `operationOwnerFromHostId("local")` → `{kind:'local'}` → routes to the **active runtime environment**. `settings.activeRuntimeEnvironmentId` is `null` here, so `{kind:'local'}` falls through to the **browser**, whose web-preload `pty.spawn` is a no-op stub that rejects with that exact string. The agent-launch RPC never reaches the daemon — the error is **browser-side only** (it does not appear in `~/.config/orca/logs/daemon.log`). The related "CLI registration is managed on the Orca server, not in the web browser" message in Settings is **informational, not an error** — the CLI is already installed server-side (`~/.local/bin/orca-ide` + `~/.local/bin/orca` in the `orca-home` volume; `orca status` → `runtimeState: ready`). | **No fix in a released Orca build yet.** The live runtime is already on the latest (**v1.4.159**, 2026-07-27, which includes the partial PR #9776) and the bug still happens — the real fix is PR **[#9147](https://github.com/stablyai/orca/pull/9147)**, not merged. **Do not bump `ORCA_VERSION` expecting a fix.** Workarounds: (a) pair the Orca **desktop app** to the server (it has a real PTY provider and bypasses the web-preload stub) instead of the browser; (b) until #9147 ships, the browser web client is effectively **view-only for opening new projects**. If a broken project gets stuck and can't be deleted from the web UI, see [Removing a stuck/phantom project](#removing-a-stuckphantom-project-web-client). |
 
 **Reading logs:**
 - Coolify API: `GET /api/v1/applications/<uuid>/logs` → returns `{"logs": "<string>"}` (not
   an array); only running containers.
 - Read-only SSH (no changes): `docker ps -a`, `docker logs --tail 100 <container>`,
   `docker exec <container> sh -c "…"` for `curl`/`ls`/`cat`.
+
+## Removing a stuck/phantom project (web client)
+
+When the web client's "Local PTYs" bug (see the Troubleshooting row above) aborts a project
+load mid-flow, the repo entry is **not** registered, but **phantom references** linger in
+Orca's state file — so the web UI keeps showing a card for it that can't be deleted from the
+UI. The `orca-ide` CLI **cannot** remove a phantom (`worktree rm` returns `selector_not_found`;
+`orca repo` has no `rm` subcommand — only list/add/show/set-base-ref/search-refs), so you must
+prune the state file directly.
+
+**State file (v1.4.159):** `~/.config/orca/profiles/local-default/orca-data.json` — **not** the
+`~/.config/orca/orca-data.json` path some older docs cite (only `orca-runtime.json` lives at the
+`~/.config/orca/` root in this version). Phantoms sit in `mobileClientTabSelectionsByDeviceId`
+(per-device tab state keyed by `<repoId>::<path>`) and `ui.setupScriptPromptDismissedRepoIds`
+(e.g. `"generation-v1:<repoId>"`).
+
+**Procedure** (drive container start/stop through Coolify; edit the volume file directly on the
+host, which has `jq`):
+
+1. **Identify the phantom.** From the running container:
+   ```bash
+   docker exec --user orca <container> bash -lc 'orca-ide repo list --json | jq -r ".result.repos[].path"'
+   F=~/.config/orca/profiles/local-default/orca-data.json
+   grep -oE "<repoId>" "$F" | wc -l   # >0 confirms phantom refs; the repo is NOT in repo list
+   ```
+   Note the worktree key `<repoId>::<path>` (e.g. `4e04e6da-…::/home/orca/Projects/<name>`) and
+   the clone dir (e.g. `~/Projects/<name>`).
+2. **Stage a jq filter** on the host (`/root/clean.jq`), substituting your `<repoId>` and `<path>`:
+   ```jq
+   .mobileClientTabSelectionsByDeviceId |= (map_values(del(."<repoId>::<path>")))
+   | .ui.setupScriptPromptDismissedRepoIds |= map(select(. != "generation-v1:<repoId>"))
+   ```
+3. **Stop the app via Coolify** so the runtime's in-memory state doesn't clobber your edit on
+   shutdown: `POST /applications/<uuid>/stop` (`coolify-api` skill). Confirm it's stopped on
+   the host (`docker ps` no longer lists it).
+4. **Edit the volume directly** on the host (the `orca-home` Docker volume maps to
+   `/var/lib/docker/volumes/orca-home/_data`; no other container mounts it):
+   ```bash
+   V=/var/lib/docker/volumes/orca-home/_data
+   D=$V/.config/orca/profiles/local-default
+   cp "$D/orca-data.json" "$D/orca-data.json.bak.pre-pty-fix"
+   jq -f /root/clean.jq "$D/orca-data.json" > "$D/orca-data.tmp"
+   jq -e . "$D/orca-data.tmp" >/dev/null && mv "$D/orca-data.tmp" "$D/orca-data.json"
+   grep -oE "<repoId>" "$D/orca-data.json" | wc -l   # expect 0
+   rm -rf "$V/Projects/<name>"                       # remove the orphan clone
+   ```
+5. **Restart via Coolify** (`POST /applications/<uuid>/restart` — `restart_only`, recreates the
+   container from the cached image, no rebuild; ~1–2 min).
+6. **Verify** from the new container:
+   ```bash
+   docker exec --user orca <container> bash -lc 'orca-ide status --json | jq -r ".result.runtime.appVersion, (.result.repos|length)"'
+   ```
+   `repo list` should show only the legitimate repos, the `<repoId>` count in the state file
+   should be 0, and the clone dir gone. Refresh the web client to confirm the stuck card is gone.
+
+> ⚠️ Remove **all** references, or the daemon may recreate the worktree as an "unknown" phantom
+> on next boot ([stablyai/orca#9024](https://github.com/stablyai/orca/issues/9024)). Backups
+> (`orca-data.json.bak.pre-pty-fix*`) are left on the volume for recovery. Verified end-to-end
+> 2026-07-27 against the live `krno4lok…` container.
 
 ## Security notes
 
@@ -788,6 +852,15 @@ replacement, so a pinned image can still read existing state after an upgrade.
   see [Pairing the Orca Mobile phone app](#pairing-the-orca-mobile-phone-app-native-mobile-client).
 - **Pairing token rotates per redeploy until `/home/orca` is persisted**, so saved browser
   connections break on each redeploy. Mount the volume (see [Persistent storage](#persistent-storage)).
+- **Browser web client can't open projects / spawn terminals** (upstream bug
+  [stablyai/orca#9047](https://github.com/stablyai/orca/issues/9047), still open): server
+  worktrees tagged `hostId:"local"` route PTY ops to the browser's no-op stub →
+  "Local PTYs are unavailable in the web client". Persists on the latest release
+  (v1.4.159, 2026-07-27); the real fix (PR #9147) is not merged, so **upgrading won't help**.
+  Workaround: pair the Orca **desktop app** to the server (real PTY provider, bypasses the
+  web-preload stub) instead of the browser — the web client is view-only for opening new
+  projects meanwhile. If a project gets stuck, see
+  [Removing a stuck/phantom project](#removing-a-stuckphantom-project-web-client).
 - The headless docs on `main` may describe behavior ahead of the v1.4.150 release; always
   cross-check the tagged docs for your pinned `ORCA_VERSION`.
 
