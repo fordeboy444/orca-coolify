@@ -9,25 +9,14 @@ echo "entrypoint starting as: $(id)"
 echo "APPDIR=$APPDIR  DISPLAY=${DISPLAY:-<unset>}  LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE}"
 echo "pairing-address=${ORCA_PAIRING_ADDRESS:-127.0.0.1}  mobile-pairing=${ORCA_MOBILE_PAIRING:-0}"
 
-# --- Claude Code custom status line: show the real backing model in the TUI footer ---
-# Idempotently set .statusLine in ~/.claude/settings.json (preserves all other keys) so
-# the built-in "Opus / Sonnet 5 …" footer is replaced by "<real model> · <effort>".
-# Runs as the orca user; jq is in the image. The script lives at a system path so the
-# orca-home volume does not shadow it. See cc-statusline.sh for the resolution logic.
-mkdir -p "$HOME/.claude"
-SL_CMD="/opt/cc-statusline.sh"
+# Strip any stale custom `statusLine` key left in ~/.claude/settings.json by the
+# reverted custom-statusline image (commit 45785a4). That image baked /opt/cc-statusline.sh
+# and wired settings.json .statusLine to it; this image no longer ships the script, so the
+# stale reference would make the TUI footer go blank. del() is idempotent — no-op once the
+# key is gone. Runs as the orca user; jq is in the image.
 if [ -f "$HOME/.claude/settings.json" ]; then
-  tmp=$(mktemp) && jq --arg cmd "$SL_CMD" \
-    '.statusLine = {"type":"command","command":$cmd,"padding":2}' \
-    "$HOME/.claude/settings.json" > "$tmp" && mv "$tmp" "$HOME/.claude/settings.json"
-else
-  printf '{"statusLine":{"type":"command","command":"%s","padding":2}}' "$SL_CMD" \
-    | jq . > "$HOME/.claude/settings.json"
+  tmp=$(mktemp) && jq 'del(.statusLine)' "$HOME/.claude/settings.json" > "$tmp" && mv "$tmp" "$HOME/.claude/settings.json"
 fi
-# Self-test: feed a canonical-id Opus payload so the container logs prove the env-var
-# fallback resolves to the real backing model. (Visible via the Coolify logs API.)
-echo "statusline self-test: $(echo '{"model":{"id":"claude-opus-5","display_name":"Opus 5"},"effort":{"level":"medium"},"fast_mode":false}' | "$SL_CMD")"
-# --- end status line setup ---
 
 # xvfb-run: starts Xvfb and sets $DISPLAY. Orca's auto-Xvfb (when DISPLAY is unset) did
 # not start inside this container, so start one explicitly. APPDIR is set so AppRun

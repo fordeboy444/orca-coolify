@@ -93,13 +93,6 @@ RUN mkdir -p /opt/orca \
     && chmod -R a+rX /opt/orca/squashfs-root \
     && chmod a+rx /opt/orca/squashfs-root/AppRun
 
-# Custom Claude Code status line script — baked at a SYSTEM path (/opt/...) so the
-# orca-home volume (mounted on /home/orca) does not shadow it; survives redeploy. The
-# entrypoint idempotently wires ~/.claude/settings.json .statusLine to this script so
-# the TUI footer shows the real backing Ollama Cloud model instead of the tier alias.
-COPY cc-statusline.sh /opt/cc-statusline.sh
-RUN chmod a+rx /opt/cc-statusline.sh
-
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
