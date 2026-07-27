@@ -119,10 +119,13 @@ The [Dockerfile](Dockerfile) is layered as follows:
      build-pinned version. Because auto-updates are off, they stay at that version until
      you update manually. Settings/auth live on the `/home/orca` volume and are unaffected.
 
-6. **Orca AppImage (back to root):** `USER root`, then the AppImage is downloaded from the
-   GitHub release (latest by default, or a pinned `ORCA_VERSION`), `--appimage-extract` once
-   at build time (no FUSE at runtime) into `/opt/orca/squashfs-root`, then `chmod -R a+rX` +
-   `chmod a+rx AppRun` so the non-root user can execute it.
+6. **Orca AppImage + `sudo` (back to root):** `USER root`, then the AppImage is downloaded
+   from the GitHub release (latest by default, or a pinned `ORCA_VERSION`),
+   `--appimage-extract` once at build time (no FUSE at runtime) into `/opt/orca/squashfs-root`,
+   then `chmod -R a+rX` + `chmod a+rx AppRun` so the non-root user can execute it. In the same
+   root block, `sudo` is installed and `orca ALL=(ALL) NOPASSWD:ALL` is appended to
+   `/etc/sudoers`, so the non-root `orca` user can install CLIs at runtime from the Orca Web
+   UI terminal (see [Installing CLIs at runtime](#installing-clis-at-runtime-sudo)).
 
 7. **Drop to `orca` for runtime:** `WORKDIR /home/orca`, `EXPOSE 6768`, `USER orca`,
    `ENTRYPOINT ["/entrypoint.sh"]`.
@@ -155,6 +158,44 @@ Verified 2026-07-24 after the user-owned-prefix rebuild: `which claude` →
 `/opt/node-global/bin/claude`, `ls -ld /opt/node-global` owned by `orca:orca`,
 `claude --version` → `2.1.218`, `claude doctor` → "No installation issues found", and
 `npm install -g @anthropic-ai/claude-code@latest` completed with no permission error.
+
+## Installing CLIs at runtime (sudo)
+
+The `orca` user has **passwordless `sudo`** (added to the Dockerfile: `apt-get install sudo`
++ `orca ALL=(ALL) NOPASSWD:ALL` in `/etc/sudoers`, installed under the `USER root` block).
+So you can install system packages and CLIs at runtime from an Orca Web UI terminal:
+
+```bash
+sudo apt-get install -y <pkg>
+sudo curl ... | sudo sh
+```
+
+This does **not** change the runtime identity — the container still runs as non-root `orca`
+(UID 1000); `sudo` is just available to it. Orca serve mode is unaffected.
+
+> ⚠️ **Runtime installs reset on every Coolify redeploy.** `sudo` itself persists (it's baked
+> into the image), but anything you `sudo apt install` lives on the container's writable
+> layer, which is discarded when Coolify redeploys — the same reason the agent CLIs in
+> `/opt/node-global` reset (see [Updating the agent CLIs](#updating-the-agent-clis)). So:
+> - For "install and use right now" → `sudo` is fine.
+> - For tools you want **permanent** (always present, e.g. for Orca agents to use
+>   autonomously) → bake them into the Dockerfile and rebuild, so they survive redeploy.
+>
+> Config/auth is **not** the concern: dotfile config under `/home/orca` (the persistent
+> volume) and anything in Coolify env vars survives redeploy, so reinstalling a CLI after a
+> redeploy does not require re-authentication — only the binary is gone.
+
+**Specific CLIs:**
+- **Coolify CLI** (so Orca agents can run `coolify` deploy commands): can be installed at
+  runtime via `sudo` (resets on redeploy), or baked into `/opt/node-global/bin` (orca-owned,
+  on `PATH`, no root needed) for persistence. Baking in is the better choice for agent use so
+  the tool is always present when an agent reaches for it.
+- **Tailscale:** a Tailscale *daemon* inside the container is redundant — the host already
+  runs Tailscale + Serve (Orca is reached via `https://hetzner-orca.tail5350b8.ts.net/`), and
+  the container already reaches tailnet IPs (Firecrawl, the files service) through the host.
+  The `tailscale` CLI *binary alone* (no `tailscaled` daemon) has limited use inside the
+  container anyway, since the CLI talks to a local daemon that isn't here. Installing it is
+  usually unnecessary.
 
 ## Headless build gotchas
 
@@ -252,6 +293,67 @@ Key facts about the pairing URL:
   "startedAt": 1784758878476
 }
 ```
+
+## Pairing the Orca Mobile phone app (native mobile client)
+
+Orca Mobile (the native phone app) pairs via one of **two** paths
+([stablyai/orca PR #9425](https://github.com/stablyai/orca/pull/9425)):
+
+1. **Orca Relay ("Anywhere")** — phone and server both connect through Orca's cloud relay.
+   Requires the server to be **signed into an Orca account**; the phone does not sign in.
+2. **Local network** — the phone connects directly to the server over WebSocket
+   (Tailscale/LAN). No account needed.
+
+This headless deployment has **no Orca account** (interactive OAuth is impractical in a
+container — see [Known limitations](#known-limitations)), so the **Relay path is
+unavailable** — the Web UI's phone-pairing screen shows **"Orca relay unavailable"**. Use the
+**Local network** path instead (the phone is on the tailnet, same as the browser).
+
+### Procedure (temporary scope switch)
+
+Runtime and mobile scope are **mutually exclusive in one `orca serve` invocation** (see
+[Pairing model](#pairing-model-v114150)). Production runs runtime scope; to mint a mobile
+pairing token you must briefly switch to mobile scope, pair the phone, then switch back. The
+phone's mobile device token persists in the `/home/orca` volume and **keeps working
+(sandboxed)** after the switch-back; the browser Web UI keeps full runtime permissions.
+
+Drive every step through the Coolify API (the `coolify-api` skill).
+
+1. **Enable mobile scope on production** — add env var `ORCA_MOBILE_PAIRING=1`
+   (`is_preview=false`, `is_literal=true`) via `POST /applications/<uuid>/envs`. Do **not**
+   deploy the stale preview env (it carries the old plain-IP `ORCA_PAIRING_ADDRESS`). Leave
+   prod `ORCA_PAIRING_ADDRESS=wss://<node>.<tailnet>.ts.net` unchanged.
+2. **Restart** (`POST /applications/<uuid>/restart`) → the container runs
+   `--serve-mobile-pairing` and `docker logs` prints `Mobile pairing QR:` plus a
+   `Pairing URL: orca://pair?code=<base64>` whose blob decodes to
+   `{"scope":"mobile","endpoint":"wss://<node>.<tailnet>.ts.net",…}`.
+3. **Pair the phone — paste the URL, do not use the Web UI QR** (see the gotcha below): copy
+   the `orca://pair?code=…` line from `docker logs` and paste it into Orca Mobile's
+   **Pair → paste link** flow on a Tailscale-connected phone. The phone connects via wss over
+   Tailscale and registers as a mobile-scope device in `~/.config/orca/orca-devices.json`.
+4. **Switch back to runtime scope** — **delete** `ORCA_MOBILE_PAIRING` from the prod env
+   (`DELETE /applications/<uuid>/envs/<env_uuid>`) and restart. The new `docker logs` banner
+   shows `mobile-pairing=0` and the `Pairing URL` blob is back to `scope=runtime`. Do **not**
+   re-pair the browser during the mobile-scope window (it would get a sandboxed mobile token).
+5. **Verify** — the phone reconnects automatically (token persisted) and can drive agents but
+   not add projects; the browser Web UI reconnects with full permissions and can still
+   `repo.add`. Server-side: `curl https://<node>.<tailnet>.ts.net/` → `200 ssl=0`; wss upgrade
+   → `101`.
+
+> ⚠️ **The Web UI's "Local network" QR does not work with a `wss://` `ORCA_PAIRING_ADDRESS`.**
+> With the production wss address, the Web UI's Local-network mobile-pairing screen reports
+> **"WebSocket transport is not running"** because Local network expects a plain
+> `ws://<lan-ip>:6768` endpoint, not a `wss://` TLS one. **Do not flip `ORCA_PAIRING_ADDRESS`
+> to the tailnet IP to "fix" this** — that would make the browser's HTTPS page open a
+> mixed-content `ws://` socket and break the Web UI. The reliable path is to **paste the
+> server-emitted `orca://pair?code=…` URL into the Orca Mobile app**, bypassing the Web UI QR.
+> (The old mobile-scope QR that paired the phone pre-2026-07-23 used the plain tailnet IP
+> `ws://100.65.54.114:6768` — that worked only because the Web UI was then served over plain
+> `http://`, not HTTPS.)
+
+> 🔒 **The `orca://pair?code=…` URL is a credential** — it can pair anyone's device to your
+> Orca until you redeploy (which mints a new token). It is captured in `docker logs`; don't
+> share or commit it. In the Tailscale model it is only useful to someone on your tailnet.
 
 ## Reachability
 
@@ -416,7 +518,7 @@ stays tailnet-only, no security downgrade, no auth needed. There's nothing extra
 | `ANTHROPIC_BASE_URL` | runtime | Claude Code backend. Production: `https://ollama.com` (Ollama Cloud's Anthropic-compatible endpoint — no `ollama` binary/daemon needed). |
 | `ANTHROPIC_AUTH_TOKEN` | runtime, secret | Bearer token for the backend. For Ollama Cloud, your `OLLAMA_API_KEY` (ollama.com authenticates via `Authorization: Bearer`, not `x-api-key`). |
 | `ANTHROPIC_MODEL` | runtime | Fallback model when no tier-specific slot applies. Production: `glm-5.2:cloud` (matches the Opus/main model). |
-| `ANTHROPIC_DEFAULT_OPUS_MODEL` / `_SONNET_MODEL` / `_HAIKU_MODEL` | runtime | Per-tier overrides (Opus = main loop, Sonnet = general, Haiku = fast background). They do **not** have to be the same model — per-tier routing with different `:cloud` models works (verified; see note below). Each slot must be set to a tag the backend accepts, or Claude Code errors "model not found". Production: Opus=`glm-5.2:cloud`, Sonnet=`kimi-k2.7-code:cloud`, Haiku=`gemma4:31b-cloud`. |
+| `ANTHROPIC_DEFAULT_OPUS_MODEL` / `_SONNET_MODEL` / `_HAIKU_MODEL` | runtime | Per-tier overrides (Opus = main loop, Sonnet = general, Haiku = fast background). They do **not** have to be the same model — per-tier routing with different `:cloud` models works (verified; see note below). Each slot must be set to a tag the backend accepts, or Claude Code errors "model not found". Production: Opus=`glm-5.2:cloud`, Sonnet=`minimax-m3:cloud`, Haiku=`deepseek-v4-flash:cloud` (swapped 2026-07-25: Sonnet was `kimi-k2.7-code:cloud`, Haiku was `nemotron-3-ultra:cloud`; both are reasoning models — revert to `gemma4:31b-cloud` or `qwen3-coder:480b-cloud` if thinking latency is too high for the fast tier). |
 | `CLAUDE_CODE_SUBAGENT_MODEL` | runtime | Model for Task-tool subagents. **Unset it to make subagents inherit the main session model** (dynamic — follows whatever the main loop runs). Set it explicitly only as a failsafe (see note below). Production: **unset** (subagents inherit `glm-5.2:cloud`). |
 | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` / `_DISABLE_NONESSENTIAL_TRAFFIC` | runtime | Set both to `1` to keep Claude Code quiet against a non-Anthropic backend. ⚠️ `_DISABLE_NONESSENTIAL_TRAFFIC` also disables Claude Code's auto-updater (`claude doctor`: "Auto-updates: disabled"), so update the CLI manually (see [Updating the agent CLIs](#updating-the-agent-clis)). |
 | `OPENAI_API_KEY` | runtime, secret | Authenticates the Codex CLI (if used). |
@@ -446,8 +548,10 @@ stays tailnet-only, no security downgrade, no auth needed. There's nothing extra
 > Verified-valid Ollama Cloud tags: `glm-5.2:cloud`, `kimi-k2.7-code:cloud`, `gemma4:31b-cloud`
 > (also `gemma4:cloud`, `gemma4:31b`), `deepseek-v4-pro:cloud`, `deepseek-v4-flash:cloud`,
 > `kimi-k2.6:cloud`, `glm-5.1:cloud`, `qwen3.5:cloud`, `qwen3-coder:480b-cloud`,
-> `minimax-m2.7:cloud`. GLM/DeepSeek/Kimi are reasoning models (emit a `thinking` block);
-> Gemma4 returns plain text — fine for the fast Haiku tier.
+> `minimax-m2.7:cloud`, `minimax-m3:cloud`, `nemotron-3-ultra:cloud` (`minimax-m3:cloud` added
+> 2026-07-25; rest verified 2026-07-24).
+> GLM/DeepSeek/Kimi/Nemotron are reasoning models (emit a `thinking` block); Gemma4 returns
+> plain text.
 >
 > **Subagents inherit the main model when `CLAUDE_CODE_SUBAGENT_MODEL` is unset** (resolution
 > order: env var → per-invocation `model` param → subagent `model:` frontmatter → main session
@@ -557,6 +661,10 @@ replacement, so a pinned image can still read existing state after an upgrade.
 | `tailscale serve` errors `Serve is not enabled on your tailnet` | The Serve feature is tailnet-wide and off by default. | Open the deep-link the CLI prints (`https://login.tailscale.com/f/serve?node=…`) and enable it, then retry. |
 | HTTPS page loads but the Web UI hangs on "loading" | `ORCA_PAIRING_ADDRESS` is still an IP / `ws://…`, so the HTTPS page opens a plain `ws://` socket → mixed-content block. | Set `ORCA_PAIRING_ADDRESS=wss://<node>.<tailnet>.ts.net` and restart via Coolify. |
 | Claude Code shows a permission / "can't auto-update" notice in the Orca terminal; `npm install -g …@latest` fails with permission denied | The CLIs were `npm install -g`'d as root into the default global prefix, which is root-owned — the non-root `orca` user can't write to it, so Claude Code's auto-updater fails at startup. | Fixed in the Dockerfile: the CLIs are installed as `orca` into a user-owned prefix (`/opt/node-global` via `NPM_CONFIG_PREFIX`). After a rebuild/redeploy, `which claude` → `/opt/node-global/bin/claude` and `npm install -g @anthropic-ai/claude-code@latest` works from the Orca terminal. |
+| Need to install a CLI/package from the Orca terminal | The container runs as non-root `orca`; system-package installs need root. | `sudo apt-get install -y <pkg>` works (the `orca` user has passwordless sudo). The install resets on the next redeploy — bake permanent tools into the Dockerfile. See [Installing CLIs at runtime](#installing-clis-at-runtime-sudo). |
+| The Web UI phone-pairing screen says **"Orca relay unavailable"** | The Orca Relay ("Anywhere") mobile-pairing path requires the server to be signed into an Orca account; this headless deployment has none. | Use the **Local network** path instead — see [Pairing the Orca Mobile phone app](#pairing-the-orca-mobile-phone-app-native-mobile-client). |
+| Web UI mobile-pairing **"Local network"** says **"WebSocket transport is not running"** | `ORCA_PAIRING_ADDRESS` is `wss://…` (production), but Local network expects a plain `ws://<ip>:6768` endpoint; flipping the address to the IP would break the HTTPS Web UI via mixed content. | Don't use the Web UI QR — paste the server-emitted `orca://pair?code=…` URL from `docker logs` into Orca Mobile's Pair → paste link. See [Pairing the Orca Mobile phone app](#pairing-the-orca-mobile-phone-app-native-mobile-client). |
+| Web UI **Settings → Orca CLI** says **"CLI registration is managed on the Orca server, not in the web browser"**, and the **terminal pane hangs at "starting terminal"** (spinner, never resolves) | Two separate things. (1) The "CLI registration" message is **informational, not an error** — "CLI registration" = putting the `orca` shell command on `PATH`; a browser can't write the server's filesystem, so the Web UI renders that toggle read-only. It is **already done** server-side: `~/.local/bin/orca-ide` (CliInstaller symlink) and `~/.local/bin/orca` (wrapper) exist in the persistent `orca-home` volume, `orca serve` auto-installs them on startup (log line: `[serve] orca CLI install: installed (/home/orca/.local/bin/orca-ide)`), and `orca status` reports `runtimeState: ready`. (2) The **"starting terminal" hang is a separate, unresolved symptom**. Investigated 2026-07-24 against the live container (`krno4lok…`): the **backend is healthy** — the Orca daemon has live interactive bash sessions on `pts/0`/`pts/1`, each running `bash --rcfile ~/.config/orca/shell-ready/bash/rcfile`, and reading `/proc/<pid>/environ` shows `orca` **is** on PATH inside them (the rcfile sources `~/.profile`, which adds `~/.local/bin`) — with no terminal/pty/spawn errors in the daemon log. **Yet the UI terminal still does not visibly come up.** Root cause not yet identified; it may be an Orca frontend/WebSocket display issue (backend shell spawned but the frontend stays on the spinner), or the user may be opening **Coolify's container-terminal button** (a separate Coolify exec widget) rather than the Orca Web UI's own pane — the two have different root causes and were not disambiguated. | **Nothing to do for CLI registration** — it is already done; confirm with `docker exec --user orca <container> bash -lc 'orca status'`. The "starting terminal" hang is **not fixed** by this investigation — backend verified healthy but the UI symptom persisted as of 2026-07-24. To pursue: first determine *which* terminal is hanging (the Orca Web UI pane vs. Coolify's container-terminal button), then investigate that path's WebSocket/exec layer. If you ever want a CLI fallback that survives a **volume wipe**, bake a symlink into the Dockerfile at `/usr/local/bin/orca` → `/opt/orca/squashfs-root/resources/bin/orca-ide` (**not** under `/home/orca` — the volume mount hides image contents there), then rebuild/redeploy. |
 
 **Reading logs:**
 - Coolify API: `GET /api/v1/applications/<uuid>/logs` → returns `{"logs": "<string>"}` (not
@@ -572,7 +680,11 @@ replacement, so a pinned image can still read existing state after an upgrade.
   missing TLS is cosmetic (the `http` is only the last hop inside an already-encrypted tunnel);
   same for the SSH-tunnel model. Do not expose 6768 to the public internet without an encrypted
   transport in front of it.
-- **Non-root runtime.** The `orca` user (UID 1000) runs the server.
+- **Non-root runtime, with `sudo`.** The `orca` user (UID 1000) runs the server. The `orca`
+  user has passwordless `sudo` (see [Installing CLIs at runtime](#installing-clis-at-runtime-sudo))
+  so CLIs can be installed at runtime; the container does **not** run as root, and Orca serve
+  mode is unaffected. This is a deliberate usability trade-off — agent-spawned processes can
+  `sudo`, so treat terminal access accordingly.
 - **Secrets.** `ANTHROPIC_AUTH_TOKEN` / `OPENAI_API_KEY` are stored as Coolify env vars
   (mark secret / not exposed). The `authToken` in `orca-runtime.json` is a secret too —
   don't expose it.
@@ -598,7 +710,8 @@ replacement, so a pinned image can still read existing state after an upgrade.
 - **Mobile (native app) scope is sandboxed.** It works without an Orca account on the
   server, but mobile-scope clients cannot add projects (`repo.add` is rejected). Production
   runs **runtime scope** (browser Web UI, full permissions, no account) for that reason.
-  Switch scopes by setting/deleting `ORCA_MOBILE_PAIRING` and redeploying.
+  Switch scopes by setting/deleting `ORCA_MOBILE_PAIRING` and redeploying. To pair a phone,
+  see [Pairing the Orca Mobile phone app](#pairing-the-orca-mobile-phone-app-native-mobile-client).
 - **Pairing token rotates per redeploy until `/home/orca` is persisted**, so saved browser
   connections break on each redeploy. Mount the volume (see [Persistent storage](#persistent-storage)).
 - The headless docs on `main` may describe behavior ahead of the v1.4.150 release; always
@@ -608,7 +721,7 @@ replacement, so a pinned image can still read existing state after an upgrade.
 
 | File | Purpose |
 | --- | --- |
-| [Dockerfile](Dockerfile) | The image: base, deps + Electron libs, Node + agent CLIs, AppImage download/extract, `orca` user, entrypoint. |
+| [Dockerfile](Dockerfile) | The image: base, deps + Electron libs, Node + agent CLIs, AppImage download/extract, `sudo` for the `orca` user, `orca` user, entrypoint. |
 | [entrypoint.sh](entrypoint.sh) | Starts Xvfb and runs `AppRun --no-sandbox --serve --serve-port 6768 --serve-pairing-address "${ORCA_PAIRING_ADDRESS:-127.0.0.1}" ${ORCA_MOBILE_PAIRING:+--serve-mobile-pairing}`. |
 | [README.md](README.md) | This document. |
 | [.gitattributes](.gitattributes) | Forces LF line endings for `entrypoint.sh` and `Dockerfile`. |

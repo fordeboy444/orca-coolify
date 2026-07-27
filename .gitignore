@@ -1,0 +1,19 @@
+# Local-only artifacts (NEVER commit)
+# ----------------------------
+# Persistent-volume snapshots — large and contain device-tokens / auth tokens
+# that act as credentials.
+_backups/
+orca-home-*.tgz
+
+# Env files and secret material — env vars live in the Coolify UI, not here.
+.env
+.env.*
+*.env
+secrets*
+credentials*
+
+# Build / runtime artifacts (not present today; defensive)
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
