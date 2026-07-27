@@ -179,7 +179,11 @@ This does **not** change the runtime identity — the container still runs as no
 > `/opt/node-global` reset (see [Updating the agent CLIs](#updating-the-agent-clis)). So:
 > - For "install and use right now" → `sudo` is fine.
 > - For tools you want **permanent** (always present, e.g. for Orca agents to use
->   autonomously) → bake them into the Dockerfile and rebuild, so they survive redeploy.
+>   autonomously) → install them **under `/home/orca`** so they survive redeploy with **no
+>   rebuild**. This is now the preferred path — see
+>   [Persistent user-installed CLIs](#persistent-user-installed-clis-survive-redeploy-no-rebuild).
+>   (Baking into the Dockerfile still works, but is only needed for tools that must exist
+>   before the volume is mounted / on a brand-new volume.)
 >
 > Config/auth is **not** the concern: dotfile config under `/home/orca` (the persistent
 > volume) and anything in Coolify env vars survives redeploy, so reinstalling a CLI after a
@@ -196,6 +200,76 @@ This does **not** change the runtime identity — the container still runs as no
   The `tailscale` CLI *binary alone* (no `tailscaled` daemon) has limited use inside the
   container anyway, since the CLI talks to a local daemon that isn't here. Installing it is
   usually unnecessary.
+
+## Persistent user-installed CLIs (survive redeploy, no rebuild)
+
+The "bake into the Dockerfile" advice above is the bulletproof option, but for user CLIs
+there is a lighter path that needs **no image rebuild and no sudo**: install them under the
+persistent `/home/orca` volume. Only `/home/orca` survives a Coolify redeploy; `/opt`,
+`/usr/bin`, and `/usr/local/bin` are an ephemeral overlayfs reset to the image every
+redeploy. So any CLI placed under `/home/orca` comes back intact, and its auth (stored in
+`~/.config`, `~/.composio`, `~/.firecrawl`, …) comes back with it.
+
+**Three persistent homes** (all under `/home/orca`, all on `PATH`):
+
+| Kind | Location | Example CLIs |
+| --- | --- | --- |
+| npm globals | `~/.npm-global` (`NPM_CONFIG_PREFIX`) | `kimi`, `ctx7`, `apify`, `buffer`, `firecrawl`, `pnpm`, `ntn`, `trigger` |
+| standalone binaries | `~/.local/bin` | `gh`, `glab`, `hcloud`, `tailscale`, `modal`, `orca`, `orca-ide` |
+| uv tools | `~/.local/share/uv/tools` (+ symlink in `~/.local/bin`) | `nlm`, `notebooklm-mcp`, `uv`/`uvx` |
+
+`claude`/`codex` and the system tools (`node`, `npm`, `jq`, `git`, …) stay image-baked in
+`/opt/node-global` / `/usr/bin` and survive via the image — they are **not** relocated.
+
+**PATH + npm-prefix wiring.** `~/.bashrc` and `~/.profile` both export (these files live in
+the volume, so the wiring itself survives redeploys):
+
+```bash
+export NPM_CONFIG_PREFIX="$HOME/.npm-global"
+export PATH="$HOME/.npm-global/bin:$HOME/.local/bin:$PATH"
+```
+
+This overrides the image's `NPM_CONFIG_PREFIX=/opt/node-global` for interactive and Orca
+shells, so a plain `npm i -g <pkg>` lands in `~/.npm-global` and persists. (The image env
+still points `claude`/`codex` at `/opt/node-global` — that's intentional; relocating them
+would shadow the image version.)
+
+**Restore / verify script.** An idempotent script is kept in the volume at
+`~/.claude/Installed Cli's/install-clis.sh` (a runtime artifact, not in this repo). It pins
+every managed CLI's version and has two modes:
+
+```bash
+bash ~/.claude/Installed\ Cli\'s/install-clis.sh install   # (re)install all, idempotent
+bash ~/.claude/Installed\ Cli\'s/install-clis.sh verify    # print a status table only
+```
+
+Run `install` once after a redeploy if anything drifts (it skips CLIs already present and
+version-correct). The managed inventory + per-CLI auth notes live alongside it in
+`~/.claude/Installed Cli's/cli list.md`.
+
+**Auth survival.** Credentials stored under `/home/orca` survive a redeploy; credentials
+stored outside it do not. In practice:
+
+- **`gh`** — token in `~/.config/gh/hosts.yml` → survives. ✅
+- **`composio`** — config in `~/.composio` → survives. ✅
+- **`glab`** — config persists, but its token can lapse (401); re-auth with `glab auth login`
+  if so.
+- **`ctx7` / `apify` / `hcloud` / `modal` / `ntn` / `nlm` / `buffer` / `firecrawl` /
+  `trigger`** — not authenticated until you run each tool's login step once; after that the
+  creds land under `~/.config` / `~/.local` and persist.
+- **`tailscale`** — binary persists, but auth state lives in `/var/lib/tailscale` (outside
+  the volume) and the daemon needs root for TUN, so it **cannot** be fully automatic. After a
+  redeploy, when needed: `tailscaled --tun=userspace-networking --statedir=$HOME/.tailscale &`
+  then `tailscale up --authkey=tskey-…` (rootless userspace mode).
+
+**Trigger.dev** (`trigger` v4.5.7, npm package `trigger.dev`) is installed this way: binary
+in `~/.npm-global/bin`, authenticated via `trigger login` (creds under `~/.config`) or
+`TRIGGER_SECRET_KEY` in a project `.env` for headless use.
+
+> **One caveat on long-lived Claude Code sessions.** The Claude Code Bash tool inherits the
+> launch-time environment and does not re-source rc files per command, so `~/.npm-global`
+> CLIs added *after* a session started won't resolve in that session's commands until it's
+> restarted. Orca terminals and fresh login shells see them immediately.
 
 ## Headless build gotchas
 
@@ -661,7 +735,7 @@ replacement, so a pinned image can still read existing state after an upgrade.
 | `tailscale serve` errors `Serve is not enabled on your tailnet` | The Serve feature is tailnet-wide and off by default. | Open the deep-link the CLI prints (`https://login.tailscale.com/f/serve?node=…`) and enable it, then retry. |
 | HTTPS page loads but the Web UI hangs on "loading" | `ORCA_PAIRING_ADDRESS` is still an IP / `ws://…`, so the HTTPS page opens a plain `ws://` socket → mixed-content block. | Set `ORCA_PAIRING_ADDRESS=wss://<node>.<tailnet>.ts.net` and restart via Coolify. |
 | Claude Code shows a permission / "can't auto-update" notice in the Orca terminal; `npm install -g …@latest` fails with permission denied | The CLIs were `npm install -g`'d as root into the default global prefix, which is root-owned — the non-root `orca` user can't write to it, so Claude Code's auto-updater fails at startup. | Fixed in the Dockerfile: the CLIs are installed as `orca` into a user-owned prefix (`/opt/node-global` via `NPM_CONFIG_PREFIX`). After a rebuild/redeploy, `which claude` → `/opt/node-global/bin/claude` and `npm install -g @anthropic-ai/claude-code@latest` works from the Orca terminal. |
-| Need to install a CLI/package from the Orca terminal | The container runs as non-root `orca`; system-package installs need root. | `sudo apt-get install -y <pkg>` works (the `orca` user has passwordless sudo). The install resets on the next redeploy — bake permanent tools into the Dockerfile. See [Installing CLIs at runtime](#installing-clis-at-runtime-sudo). |
+| Need to install a CLI/package from the Orca terminal | The container runs as non-root `orca`; system-package installs need root. | `sudo apt-get install -y <pkg>` works (the `orca` user has passwordless sudo). The install resets on the next redeploy. For a tool you want **permanent** without a rebuild, install it under `/home/orca` (`~/.npm-global` for npm globals, `~/.local/bin` for standalone binaries) so it survives redeploy — see [Persistent user-installed CLIs](#persistent-user-installed-clis-survive-redeploy-no-rebuild). |
 | The Web UI phone-pairing screen says **"Orca relay unavailable"** | The Orca Relay ("Anywhere") mobile-pairing path requires the server to be signed into an Orca account; this headless deployment has none. | Use the **Local network** path instead — see [Pairing the Orca Mobile phone app](#pairing-the-orca-mobile-phone-app-native-mobile-client). |
 | Web UI mobile-pairing **"Local network"** says **"WebSocket transport is not running"** | `ORCA_PAIRING_ADDRESS` is `wss://…` (production), but Local network expects a plain `ws://<ip>:6768` endpoint; flipping the address to the IP would break the HTTPS Web UI via mixed content. | Don't use the Web UI QR — paste the server-emitted `orca://pair?code=…` URL from `docker logs` into Orca Mobile's Pair → paste link. See [Pairing the Orca Mobile phone app](#pairing-the-orca-mobile-phone-app-native-mobile-client). |
 | Web UI **Settings → Orca CLI** says **"CLI registration is managed on the Orca server, not in the web browser"**, and the **terminal pane hangs at "starting terminal"** (spinner, never resolves) | Two separate things. (1) The "CLI registration" message is **informational, not an error** — "CLI registration" = putting the `orca` shell command on `PATH`; a browser can't write the server's filesystem, so the Web UI renders that toggle read-only. It is **already done** server-side: `~/.local/bin/orca-ide` (CliInstaller symlink) and `~/.local/bin/orca` (wrapper) exist in the persistent `orca-home` volume, `orca serve` auto-installs them on startup (log line: `[serve] orca CLI install: installed (/home/orca/.local/bin/orca-ide)`), and `orca status` reports `runtimeState: ready`. (2) The **"starting terminal" hang is a separate, unresolved symptom**. Investigated 2026-07-24 against the live container (`krno4lok…`): the **backend is healthy** — the Orca daemon has live interactive bash sessions on `pts/0`/`pts/1`, each running `bash --rcfile ~/.config/orca/shell-ready/bash/rcfile`, and reading `/proc/<pid>/environ` shows `orca` **is** on PATH inside them (the rcfile sources `~/.profile`, which adds `~/.local/bin`) — with no terminal/pty/spawn errors in the daemon log. **Yet the UI terminal still does not visibly come up.** Root cause not yet identified; it may be an Orca frontend/WebSocket display issue (backend shell spawned but the frontend stays on the spinner), or the user may be opening **Coolify's container-terminal button** (a separate Coolify exec widget) rather than the Orca Web UI's own pane — the two have different root causes and were not disambiguated. | **Nothing to do for CLI registration** — it is already done; confirm with `docker exec --user orca <container> bash -lc 'orca status'`. The "starting terminal" hang is **not fixed** by this investigation — backend verified healthy but the UI symptom persisted as of 2026-07-24. To pursue: first determine *which* terminal is hanging (the Orca Web UI pane vs. Coolify's container-terminal button), then investigate that path's WebSocket/exec layer. If you ever want a CLI fallback that survives a **volume wipe**, bake a symlink into the Dockerfile at `/usr/local/bin/orca` → `/opt/orca/squashfs-root/resources/bin/orca-ide` (**not** under `/home/orca` — the volume mount hides image contents there), then rebuild/redeploy. |
