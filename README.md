@@ -89,11 +89,19 @@ The [Dockerfile](Dockerfile) is layered as follows:
 2. **Headless-guide deps + Electron/Chromium shared libs.** The headless guide targets a
    full Ubuntu install; the minimal `ubuntu:22.04` base lacks the libraries Electron needs,
    so without them `orca serve` exits immediately. Installed:
-   `curl file jq xvfb zlib1g-dev libfuse2 ca-certificates git gnupg xz-utils` plus the
-   Electron/Chromium libs `libnss3 libxss1 libasound2 libatk-bridge2.0-0 libatk1.0-0
+   `curl file jq xvfb zlib1g-dev libfuse2 ca-certificates git gnupg xz-utils build-essential`
+   plus the Electron/Chromium libs `libnss3 libxss1 libasound2 libatk-bridge2.0-0 libatk1.0-0
    libcairo2 libcups2 libdbus-1-3 libdrm2 libgbm1 libgdk-pixbuf2.0-0 libgtk-3-0 libnspr4
    libpango-1.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libxkbcommon0
    libxshmfence1 libx11-6 libxcb1 libxext6 libxres1 fonts-liberation`.
+
+   **`build-essential`** is baked in so npm can compile native modules from source at
+   runtime — notably `node-pty@1.1.0`, which ships no linux prebuilds and is pulled
+   transitively by `npm:relay-code-pi` (via `@plannotator/pi-extension` →
+   `@plannotator/webtui` → `node-pty`). Without it, `pi install npm:relay-code-pi` fails
+   with `not found: make`. A runtime `sudo apt install build-essential` works once but
+   resets on the next redeploy (`/opt`/`/usr` are overlayfs), so the toolchain has to
+   live in the image.
 
 3. **Node 22 LTS** (NodeSource). Node 22+ is required by the `@anthropic-ai/claude-code`
    npm package as of v2.1.198 (Node 20 only warns `EBADENGINE` today, but will fail in a

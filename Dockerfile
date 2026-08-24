@@ -24,8 +24,15 @@ ENV LIBGL_ALWAYS_SOFTWARE=1
 # libraries Electron/Chromium needs. The headless guide targets a full Ubuntu
 # install; the minimal ubuntu:22.04 base image lacks these, so without them
 # orca serve exits immediately on startup.
+#
+# `build-essential` (gcc/g++/make/libc6-dev/dpkg-dev) is baked in so npm can
+# compile native modules from source — notably node-pty@1.1.0 (pulled
+# transitively by npm:relay-code-pi) which ships no linux prebuilds. A
+# runtime `sudo apt install build-essential` resets on every Coolify redeploy
+# (/opt, /usr are overlayfs), so the toolchain has to live in the image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl file jq xvfb zlib1g-dev libfuse2 ca-certificates git gnupg xz-utils \
+        build-essential \
         libnss3 libxss1 libasound2 libatk-bridge2.0-0 libatk1.0-0 \
         libcairo2 libcups2 libdbus-1-3 libdrm2 libgbm1 libgdk-pixbuf2.0-0 \
         libgtk-3-0 libnspr4 libpango-1.0-0 libxcomposite1 libxdamage1 \
