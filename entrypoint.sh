@@ -62,9 +62,11 @@ fi
 # Set ORCA_PAIRING_ADDRESS to an address the clients can reach (Tailscale IP/hostname,
 # LAN IP, or a public wss:// URL) — it is baked into the pairing QR as the ws endpoint.
 # Default 127.0.0.1 only works for an SSH-forwarded browser on the same machine.
-xvfb-run -a --server-args="-screen 0 1280x800x24 -ac" \
+xvfb-run -a --server-args="-screen 0 1280x800x16 -ac +extension MIT-SHM" \
   "$APPDIR/AppRun" --no-sandbox --serve --serve-port 6768 \
     --serve-pairing-address "${ORCA_PAIRING_ADDRESS:-127.0.0.1}" \
+    --disable-dev-shm-usage \
+    --disable-gpu-vsync \
     ${ORCA_MOBILE_PAIRING:+--serve-mobile-pairing}
 rc=$?
 echo ">>> orca serve exited with code $rc"

@@ -618,6 +618,16 @@ stays tailnet-only, no security downgrade, no auth needed. There's nothing extra
 > allowlist drops `ANTHROPIC_BASE_URL`). No `ollama` binary or daemon is installed; the
 > `ollama launch claude` command does not exist in the container.
 >
+> **⚠️ Redeploys can drop env vars (hit 2026-08-27):** a rebuild/redeploy silently removed
+> `ANTHROPIC_AUTH_TOKEN` from the app's Coolify env, and Claude Code came up with
+> "Not logged in · Please run /login" — with no credential present it falls through to the
+> OAuth login gate, even though `ANTHROPIC_BASE_URL`, the model slots, and the CLI itself
+> were all fine. Fix: re-create the var via the API (`POST /applications/{uuid}/envs`
+> with `key=ANTHROPIC_AUTH_TOKEN`, `value=<OLLAMA_API_KEY>`, `is_preview:false`) and
+> `POST /applications/{uuid}/restart`. After any redeploy, diff the env list:
+> `GET /applications/{uuid}/envs | jq -r '.[].key' | sort` — it must still contain
+> `ANTHROPIC_AUTH_TOKEN` and `OPENAI_API_KEY`.
+>
 > **Per-tier routing (verified 2026-07-23):** the three `ANTHROPIC_DEFAULT_*_MODEL` slots can
 > hold *different* `:cloud` models simultaneously — Claude Code routes each tier to its own
 > model. (An earlier version of this README claimed all three must be the same model or

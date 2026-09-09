@@ -17,6 +17,7 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV LIBGL_ALWAYS_SOFTWARE=1
+ENV ORCA_RENDERER_HEAP_MB=4096
 # DISPLAY intentionally unset: Orca auto-starts Xvfb for `orca serve` when no
 # DISPLAY is set (per the headless guide).
 
