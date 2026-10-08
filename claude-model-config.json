@@ -23,6 +23,7 @@
       { "model": "deepseek-v4-flash:cloud",      "label": "DeepSeek V4 Flash" },
       { "model": "deepseek-v4-pro:0813-cloud",   "label": "DeepSeek V4 Pro 0813" },
       { "model": "deepseek-v4-pro:cloud",        "label": "DeepSeek V4 Pro" },
+      { "model": "deepseek-v4.1-flash:cloud",    "label": "DeepSeek V4.1 Flash" },
       { "model": "gemma4:31b-cloud",             "label": "Gemma4 31B" },
       { "model": "gemma4:cloud",                 "label": "Gemma4" },
       { "model": "glm-5.1:cloud",                "label": "GLM 5.1" },
