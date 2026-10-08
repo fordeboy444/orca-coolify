@@ -9,13 +9,43 @@ echo "entrypoint starting as: $(id)"
 echo "APPDIR=$APPDIR  DISPLAY=${DISPLAY:-<unset>}  LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE}"
 echo "pairing-address=${ORCA_PAIRING_ADDRESS:-127.0.0.1}  mobile-pairing=${ORCA_MOBILE_PAIRING:-0}"
 
-# Strip any stale custom `statusLine` key left in ~/.claude/settings.json by the
-# reverted custom-statusline image (commit 45785a4). That image baked /opt/cc-statusline.sh
-# and wired settings.json .statusLine to it; this image no longer ships the script, so the
-# stale reference would make the TUI footer go blank. del() is idempotent — no-op once the
-# key is gone. Runs as the orca user; jq is in the image.
-if [ -f "$HOME/.claude/settings.json" ]; then
-  tmp=$(mktemp) && jq 'del(.statusLine)' "$HOME/.claude/settings.json" > "$tmp" && mv "$tmp" "$HOME/.claude/settings.json"
+# --- Claude Code model config: seed the repo template into ~/.claude/settings.json ---
+# The orca app used to get its model configuration only from Coolify env vars, which meant
+# every model change needed a Coolify edit plus a redeploy. The template baked in at
+# /opt/orca-config/claude-model-config.json carries "model" + "modelPicker" instead, so the
+# file on the orca-home volume is authoritative and the /model picker is curated there.
+#
+# MERGE DIRECTION IS THE SAFETY PROPERTY: `$tpl[0] * .` gives the ON-DISK file precedence
+# (in jq, the right operand of `*` wins), so this only fills keys that are ABSENT and never
+# overwrites a manual edit on the volume. Re-running it is a no-op once the keys exist.
+#
+# It also strips any stale custom `statusLine` key left in settings.json by the reverted
+# custom-statusline image (commit 45785a4). That image baked /opt/cc-statusline.sh and wired
+# settings.json .statusLine to it; this image no longer ships the script, so the stale
+# reference would make the TUI footer go blank. del() is idempotent.
+#
+# jq validates the merged result BEFORE the mv, so a bad merge cannot corrupt the file.
+# `set +e` at the top means a failure here never stops Orca from starting. Runs as the orca
+# user, so the file lands orca-owned (UID 1000) — see .claude/memory/volume-file-permissions.md.
+CC_SETTINGS="$HOME/.claude/settings.json"
+CC_TEMPLATE=/opt/orca-config/claude-model-config.json
+mkdir -p "$HOME/.claude"
+if [ -f "$CC_TEMPLATE" ]; then
+  tmp=$(mktemp)
+  if [ -f "$CC_SETTINGS" ]; then
+    jq --slurpfile tpl "$CC_TEMPLATE" '$tpl[0] * . | del(.statusLine, ._comment)' "$CC_SETTINGS" > "$tmp"
+  else
+    jq -n --slurpfile tpl "$CC_TEMPLATE" '$tpl[0] | del(.statusLine, ._comment)' > "$tmp"
+  fi
+  if [ -s "$tmp" ] && jq empty "$tmp" 2>/dev/null; then
+    mv "$tmp" "$CC_SETTINGS"
+    echo "cc-model-config: merged $CC_TEMPLATE into $CC_SETTINGS"
+  else
+    echo "cc-model-config: MERGE FAILED, $CC_SETTINGS left unchanged"
+    rm -f "$tmp"
+  fi
+elif [ -f "$CC_SETTINGS" ]; then
+  tmp=$(mktemp) && jq 'del(.statusLine)' "$CC_SETTINGS" > "$tmp" && mv "$tmp" "$CC_SETTINGS"
 fi
 
 # xvfb-run: starts Xvfb and sets $DISPLAY. Orca's auto-Xvfb (when DISPLAY is unset) did

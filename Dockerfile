@@ -104,6 +104,12 @@ RUN mkdir -p /opt/orca \
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# Seed template for the Claude Code model config on the orca-home volume. entrypoint.sh
+# merges it into ~/.claude/settings.json as a GAP-FILL (the volume file always wins), so
+# the /model picker list and the default model live in the Claude Code folder instead of
+# Coolify env vars. World-readable; the runtime `orca` user only reads it.
+COPY claude-model-config.json /opt/orca-config/claude-model-config.json
+
 WORKDIR /home/orca
 EXPOSE 6768
 USER orca
