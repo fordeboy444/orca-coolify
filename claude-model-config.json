@@ -1,5 +1,5 @@
 {
-  "_comment": "Claude Code model config for the orca app. Seeded into /home/orca/.claude/settings.json by entrypoint.sh as a GAP-FILL merge: the on-disk file wins for existing keys, so a key already on the orca-home volume is never overwritten. jq '*' deep-merges OBJECTS but REPLACES arrays, so: a scalar/array key that exists on disk is protected, but a NEW key inside an existing object (e.g. a new key in 'env') IS added. The /model picker list, the default model, and every tier pin live here. Edit the volume file for runtime changes; edit this file to change the seed. Mirrors the live volume file as of 2026-10-08. NOTE: each ANTHROPIC_DEFAULT_*_MODEL_NAME must equal its ANTHROPIC_DEFAULT_*_MODEL, or the picker shows one name and runs another model.",
+  "_comment": "Claude Code model config for the orca app. Seeded into /home/orca/.claude/settings.json by entrypoint.sh as a GAP-FILL merge: the on-disk file wins for existing keys, so a key already on the orca-home volume is never overwritten. jq '*' deep-merges OBJECTS but REPLACES arrays, so: a scalar/array key that exists on disk is protected, but a NEW key inside an existing object (e.g. a new key in 'env') IS added. This file only takes effect on a FRESH volume; the live volume keeps its own array. Mirrors the live volume file exactly as of 2026-10-08 (23 picker rows). Edit the volume file for runtime changes; edit this file only to change what a fresh volume gets. NOTE: each ANTHROPIC_DEFAULT_*_MODEL_NAME must equal its ANTHROPIC_DEFAULT_*_MODEL, or the picker shows one name and runs another model.",
   "model": "sonnet",
   "env": {
     "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4.1-flash:cloud",
@@ -19,14 +19,11 @@
   "modelPicker": {
     "replaceBuiltInOptions": false,
     "options": [
-      { "model": "deepseek-v4-flash:0731-cloud", "label": "DeepSeek V4 Flash 0731" },
-      { "model": "deepseek-v4-flash:cloud",      "label": "DeepSeek V4 Flash" },
       { "model": "deepseek-v4-pro:0813-cloud",   "label": "DeepSeek V4 Pro 0813" },
       { "model": "deepseek-v4-pro:cloud",        "label": "DeepSeek V4 Pro" },
       { "model": "deepseek-v4.1-flash:cloud",    "label": "DeepSeek V4.1 Flash" },
       { "model": "gemma4:31b-cloud",             "label": "Gemma4 31B" },
       { "model": "gemma4:cloud",                 "label": "Gemma4" },
-      { "model": "glm-5.1:cloud",                "label": "GLM 5.1" },
       { "model": "glm-5.2:cloud",                "label": "GLM 5.2" },
       { "model": "glm-5.3-flash:cloud",          "label": "GLM 5.3 Flash" },
       { "model": "glm-5.3:cloud",                "label": "GLM 5.3" },
@@ -40,15 +37,11 @@
       { "model": "minimax-m3:cloud",             "label": "MiniMax M3" },
       { "model": "mistral-large-3:675b-cloud",   "label": "Mistral Large 3 675B" },
       { "model": "mistral-large-3:cloud",        "label": "Mistral Large 3" },
+      { "model": "mistral-large-4:cloud",        "label": "Mistral Large 4" },
       { "model": "nemotron-3-nano:30b-cloud",    "label": "Nemotron 3 Nano 30B" },
       { "model": "nemotron-3-nano:cloud",        "label": "Nemotron 3 Nano" },
       { "model": "nemotron-3-super:cloud",       "label": "Nemotron 3 Super" },
-      { "model": "nemotron-3-ultra:cloud",       "label": "Nemotron 3 Ultra" },
-      { "model": "qwen3.5:397b-cloud",           "label": "Qwen3.5 397B" },
-      { "model": "qwen3.5:cloud",                "label": "Qwen3.5" },
-      { "model": "gemini-3.8-flash",             "label": "Gemini 3.8 Flash" },
-      { "model": "gemini-3.5-flash-lite",        "label": "Gemini 3.5 Flash Lite" },
-      { "model": "gemini-2.5-pro",               "label": "Gemini 2.5 Pro" }
+      { "model": "nemotron-3-ultra:cloud",       "label": "Nemotron 3 Ultra" }
     ]
   }
 }
