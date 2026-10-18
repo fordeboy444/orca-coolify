@@ -48,6 +48,25 @@ elif [ -f "$CC_SETTINGS" ]; then
   tmp=$(mktemp) && jq 'del(.statusLine)' "$CC_SETTINGS" > "$tmp" && mv "$tmp" "$CC_SETTINGS"
 fi
 
+# --- Single-instance lock: remove a lock left by a PREVIOUS container ---
+# A redeploy creates a new container with a new machineIdentity. The old container's
+# orcad.lock stays behind on the orca-home volume. On start, `orca serve` reads that
+# lock, decides "another machine" holds the data root, and exits with code 3; Docker
+# then restarts the container forever and every client gets 502.
+# The lock is stale when its pid is not a live orca process IN THIS container. A live
+# orca process still owns the data root, so keep the lock in that case.
+ORCA_LOCK="$HOME/.config/orca/orcad.lock"
+if [ -f "$ORCA_LOCK" ]; then
+  lock_pid=$(jq -r '.pid // empty' "$ORCA_LOCK" 2>/dev/null)
+  if [ -n "$lock_pid" ] && [ -r "/proc/$lock_pid/cmdline" ] \
+     && tr '\0' ' ' < "/proc/$lock_pid/cmdline" 2>/dev/null | grep -q orca; then
+    echo "orcad-lock: live orca process $lock_pid keeps the lock"
+  else
+    echo "orcad-lock: stale lock (pid=${lock_pid:-unknown}) — removed"
+    rm -f "$ORCA_LOCK"
+  fi
+fi
+
 # xvfb-run: starts Xvfb and sets $DISPLAY. Orca's auto-Xvfb (when DISPLAY is unset) did
 # not start inside this container, so start one explicitly. APPDIR is set so AppRun
 # resolves $APPDIR/orca-ide.
