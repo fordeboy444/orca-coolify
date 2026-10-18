@@ -104,6 +104,13 @@ RUN mkdir -p /opt/orca \
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
+# Redirect Orca's "System Browser" action to the hosted Chrome service.
+# The image ships no xdg-open, so Electron's shell.openExternal fails.
+# One-way: the link opens as a new tab in the hosted Chrome (CDP 9333).
+# See .claude/memory/orca-system-browser-to-chrome.md.
+COPY orca-open-in-chrome.sh /usr/local/bin/xdg-open
+RUN chmod 755 /usr/local/bin/xdg-open
+
 # Seed template for the Claude Code model config on the orca-home volume. entrypoint.sh
 # merges it into ~/.claude/settings.json as a GAP-FILL (the volume file always wins), so
 # the /model picker list and the default model live in the Claude Code folder instead of
