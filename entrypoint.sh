@@ -9,49 +9,55 @@ echo "entrypoint starting as: $(id)"
 echo "APPDIR=$APPDIR  DISPLAY=${DISPLAY:-<unset>}  LIBGL_ALWAYS_SOFTWARE=${LIBGL_ALWAYS_SOFTWARE}"
 echo "pairing-address=${ORCA_PAIRING_ADDRESS:-127.0.0.1}  mobile-pairing=${ORCA_MOBILE_PAIRING:-0}"
 
-# --- Claude Code model config: seed the repo template into ~/.claude/settings.json ---
-# The orca app used to get its model configuration only from Coolify env vars, which meant
-# every model change needed a Coolify edit plus a redeploy. The template baked in at
-# /opt/orca-config/claude-model-config.json carries "model" + "modelPicker" instead, so the
-# file on the orca-home volume is authoritative and the /model picker is curated there.
+# --- Claude Code settings: SEED ONCE, NEVER MERGE ---
+# The orca-home volume holds the authoritative ~/.claude/settings.json. This PC keeps it
+# in sync with tools/sync-settings-to-orca.py, so the file must stay exactly as synced.
 #
-# MERGE DIRECTION IS THE SAFETY PROPERTY: `$tpl[0] * .` gives the ON-DISK file precedence
-# (in jq, the right operand of `*` wins), so this only fills keys that are ABSENT and never
-# overwrites a manual edit on the volume. Re-running it is a no-op once the keys exist.
+# 2026-10-18..2026-11-11 BUG: the old code did a gap-fill merge ($tpl[0] * .). It added
+# back every key that was ABSENT from the volume file on each boot. CLAUDE_CODE_SUBAGENT_MODEL
+# returned that way after every nightly updater deploy, and any key deleted to mirror the
+# local file came back too. Never merge an existing file again.
 #
-# It also strips any stale custom `statusLine` key left in settings.json by the reverted
-# custom-statusline image (commit 45785a4). That image baked /opt/cc-statusline.sh and wired
-# settings.json .statusLine to it; this image no longer ships the script, so the stale
-# reference would make the TUI footer go blank. del() is idempotent.
+# Rules now:
+#   1. Existing settings.json -> keep it. Only strip the keys below (idempotent; no write
+#      when nothing changes).
+#   2. No settings.json (fresh volume) -> seed it from the baked template.
+#   3. CLAUDE_CODE_SUBAGENT_MODEL must never exist: when set, every subagent runs on that
+#      one model and does not inherit the main session model. Do not remove this strip.
+#   4. statusLine / _comment are stripped because the custom-statusline image (commit
+#      45785a4) is gone, so a stale reference would blank the TUI footer.
 #
-# jq validates the merged result BEFORE the mv, so a bad merge cannot corrupt the file.
-# `set +e` at the top means a failure here never stops Orca from starting. Runs as the orca
-# user, so the file lands orca-owned (UID 1000) — see .claude/memory/volume-file-permissions.md.
-# ⚠️ CLAUDE_CODE_SUBAGENT_MODEL must NEVER exist in this file. When it is set, every
-# subagent runs on that one fixed model and does NOT inherit the main session model.
-# A stale image template re-added `glm-5.2:cloud` this way from 2026-10-18 to 2026-11-11.
-# The del() below removes the key on EVERY boot, so it can never come back — not from the
-# template, and not from a manual edit on the volume. This strip is intentional; do not
-# remove it.
+# jq validates the result BEFORE the mv, so a bad edit cannot corrupt the file. `set +e`
+# at the top means a failure here never stops Orca from starting. Runs as the orca user,
+# so the file lands orca-owned (UID 1000) — see .claude/memory/volume-file-permissions.md.
 CC_SETTINGS="$HOME/.claude/settings.json"
 CC_TEMPLATE=/opt/orca-config/claude-model-config.json
 mkdir -p "$HOME/.claude"
-if [ -f "$CC_TEMPLATE" ]; then
+if [ -f "$CC_SETTINGS" ]; then
   tmp=$(mktemp)
-  if [ -f "$CC_SETTINGS" ]; then
-    jq --slurpfile tpl "$CC_TEMPLATE" '$tpl[0] * . | del(.statusLine, ._comment, .["env"]["CLAUDE_CODE_SUBAGENT_MODEL"])' "$CC_SETTINGS" > "$tmp"
-  else
-    jq -n --slurpfile tpl "$CC_TEMPLATE" '$tpl[0] | del(.statusLine, ._comment, .["env"]["CLAUDE_CODE_SUBAGENT_MODEL"])' > "$tmp"
-  fi
+  jq 'del(.statusLine, ._comment, .["env"]["CLAUDE_CODE_SUBAGENT_MODEL"])' "$CC_SETTINGS" > "$tmp"
   if [ -s "$tmp" ] && jq empty "$tmp" 2>/dev/null; then
-    mv "$tmp" "$CC_SETTINGS"
-    echo "cc-model-config: merged $CC_TEMPLATE into $CC_SETTINGS"
+    if cmp -s "$tmp" "$CC_SETTINGS"; then
+      echo "cc-settings: existing file kept unchanged"
+      rm -f "$tmp"
+    else
+      mv "$tmp" "$CC_SETTINGS"
+      echo "cc-settings: existing file kept (forbidden keys stripped)"
+    fi
   else
-    echo "cc-model-config: MERGE FAILED, $CC_SETTINGS left unchanged"
+    echo "cc-settings: STRIP FAILED, $CC_SETTINGS left unchanged"
     rm -f "$tmp"
   fi
-elif [ -f "$CC_SETTINGS" ]; then
-  tmp=$(mktemp) && jq 'del(.statusLine, .["env"]["CLAUDE_CODE_SUBAGENT_MODEL"])' "$CC_SETTINGS" > "$tmp" && mv "$tmp" "$CC_SETTINGS"
+elif [ -f "$CC_TEMPLATE" ]; then
+  tmp=$(mktemp)
+  jq -n --slurpfile tpl "$CC_TEMPLATE" '$tpl[0] | del(.statusLine, ._comment, .["env"]["CLAUDE_CODE_SUBAGENT_MODEL"])' > "$tmp"
+  if [ -s "$tmp" ] && jq empty "$tmp" 2>/dev/null; then
+    mv "$tmp" "$CC_SETTINGS"
+    echo "cc-settings: fresh volume seeded from $CC_TEMPLATE"
+  else
+    echo "cc-settings: SEED FAILED, no settings.json created"
+    rm -f "$tmp"
+  fi
 fi
 
 # --- Single-instance lock: remove a lock left by a PREVIOUS container ---
