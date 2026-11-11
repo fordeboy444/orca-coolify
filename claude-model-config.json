@@ -1,27 +1,26 @@
 {
-  "_comment": "Claude Code model config for the orca app. Seeded into /home/orca/.claude/settings.json by entrypoint.sh as a GAP-FILL merge: the on-disk file wins for existing keys, so a key already on the orca-home volume is never overwritten. jq '*' deep-merges OBJECTS but REPLACES arrays, so: a scalar/array key that exists on disk is protected, but a NEW key inside an existing object (e.g. a new key in 'env') IS added. This file only takes effect on a FRESH volume; the live volume keeps its own array. Mirrors the live volume file exactly as of 2026-10-08 (23 picker rows). Edit the volume file for runtime changes; edit this file only to change what a fresh volume gets. NOTE: each ANTHROPIC_DEFAULT_*_MODEL_NAME must equal its ANTHROPIC_DEFAULT_*_MODEL, or the picker shows one name and runs another model.",
+  "_comment": "Claude Code model config for the orca app. Seeded into /home/orca/.claude/settings.json by entrypoint.sh as a GAP-FILL merge: the on-disk file wins for existing keys, so a key already on the orca-home volume is never overwritten. jq '*' deep-merges OBJECTS but REPLACES arrays, so: a scalar/array key that exists on disk is protected, but a NEW key inside an existing object (e.g. a new key in 'env') IS added. This file only takes effect on a FRESH volume; the live volume keeps its own array. Mirrors the live volume file as of 2026-10-08 (23 picker rows); the two V4.1 Flash tier rows and the picker row moved to the `:1017-cloud` tag on 2026-10-17. Edit the volume file for runtime changes; edit this file only to change what a fresh volume gets. NOTE: each ANTHROPIC_DEFAULT_*_MODEL_NAME must equal its ANTHROPIC_DEFAULT_*_MODEL, or the picker shows one name and runs another model. CLAUDE_CODE_SUBAGENT_MODEL is deliberately ABSENT: when unset, subagents inherit the main session model. Do not add it back. entrypoint.sh deletes this key from settings.json on every boot.",
   "model": "sonnet",
   "env": {
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4.1-flash:cloud",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "deepseek-v4.1-flash:cloud",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4.1-flash:1017-cloud",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "deepseek-v4.1-flash:1017-cloud",
     "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION": "opus custom model",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4.1-flash:cloud",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "deepseek-v4.1-flash:cloud",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4.1-flash:1017-cloud",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "deepseek-v4.1-flash:1017-cloud",
     "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION": "sonnet custom model",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "gemma4:31b-cloud",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "gemma4:31b-cloud",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "beam:cloud",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "beam:cloud",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION": "haiku custom model",
     "ANTHROPIC_DEFAULT_FABLE_MODEL": "glm-5.3:cloud",
     "ANTHROPIC_DEFAULT_FABLE_MODEL_NAME": "glm-5.3:cloud",
-    "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION": "fable custom model",
-    "CLAUDE_CODE_SUBAGENT_MODEL": "glm-5.2:cloud"
+    "ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION": "fable custom model"
   },
   "modelPicker": {
     "replaceBuiltInOptions": false,
     "options": [
       { "model": "deepseek-v4-pro:0813-cloud",   "label": "DeepSeek V4 Pro 0813" },
       { "model": "deepseek-v4-pro:cloud",        "label": "DeepSeek V4 Pro" },
-      { "model": "deepseek-v4.1-flash:cloud",    "label": "DeepSeek V4.1 Flash" },
+      { "model": "deepseek-v4.1-flash:1017-cloud", "label": "DeepSeek V4.1 Flash 1017" },
       { "model": "gemma4:31b-cloud",             "label": "Gemma4 31B" },
       { "model": "gemma4:cloud",                 "label": "Gemma4" },
       { "model": "glm-5.2:cloud",                "label": "GLM 5.2" },

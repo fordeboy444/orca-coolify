@@ -64,7 +64,7 @@ but both slots must be kept in sync. Mark every secret with `is_secret=true`.
 | `ANTHROPIC_DEFAULT_OPUS_MODEL` | `glm-5.2:cloud` |
 | `ANTHROPIC_DEFAULT_SONNET_MODEL` | `minimax-m3:cloud` |
 | `ANTHROPIC_DEFAULT_HAIKU_MODEL` | `deepseek-v4-flash:cloud` |
-| `CLAUDE_CODE_SUBAGENT_MODEL` | `glm-5.2:cloud` |
+| `CLAUDE_CODE_SUBAGENT_MODEL` | ⚠️ **Never set this key.** Leave it unset so subagents inherit the main model. `entrypoint.sh` deletes it from `settings.json` on every boot. |
 | `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` | `1` |
 | `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` | `1` |
 | `ORCA_MOBILE_PAIRING` | **leave unset / empty** for browser scope (runtime). Any non-empty value switches to mobile-scope pairing. |

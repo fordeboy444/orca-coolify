@@ -27,15 +27,21 @@ echo "pairing-address=${ORCA_PAIRING_ADDRESS:-127.0.0.1}  mobile-pairing=${ORCA_
 # jq validates the merged result BEFORE the mv, so a bad merge cannot corrupt the file.
 # `set +e` at the top means a failure here never stops Orca from starting. Runs as the orca
 # user, so the file lands orca-owned (UID 1000) — see .claude/memory/volume-file-permissions.md.
+# ⚠️ CLAUDE_CODE_SUBAGENT_MODEL must NEVER exist in this file. When it is set, every
+# subagent runs on that one fixed model and does NOT inherit the main session model.
+# A stale image template re-added `glm-5.2:cloud` this way from 2026-10-18 to 2026-11-11.
+# The del() below removes the key on EVERY boot, so it can never come back — not from the
+# template, and not from a manual edit on the volume. This strip is intentional; do not
+# remove it.
 CC_SETTINGS="$HOME/.claude/settings.json"
 CC_TEMPLATE=/opt/orca-config/claude-model-config.json
 mkdir -p "$HOME/.claude"
 if [ -f "$CC_TEMPLATE" ]; then
   tmp=$(mktemp)
   if [ -f "$CC_SETTINGS" ]; then
-    jq --slurpfile tpl "$CC_TEMPLATE" '$tpl[0] * . | del(.statusLine, ._comment)' "$CC_SETTINGS" > "$tmp"
+    jq --slurpfile tpl "$CC_TEMPLATE" '$tpl[0] * . | del(.statusLine, ._comment, .["env"]["CLAUDE_CODE_SUBAGENT_MODEL"])' "$CC_SETTINGS" > "$tmp"
   else
-    jq -n --slurpfile tpl "$CC_TEMPLATE" '$tpl[0] | del(.statusLine, ._comment)' > "$tmp"
+    jq -n --slurpfile tpl "$CC_TEMPLATE" '$tpl[0] | del(.statusLine, ._comment, .["env"]["CLAUDE_CODE_SUBAGENT_MODEL"])' > "$tmp"
   fi
   if [ -s "$tmp" ] && jq empty "$tmp" 2>/dev/null; then
     mv "$tmp" "$CC_SETTINGS"
@@ -45,7 +51,7 @@ if [ -f "$CC_TEMPLATE" ]; then
     rm -f "$tmp"
   fi
 elif [ -f "$CC_SETTINGS" ]; then
-  tmp=$(mktemp) && jq 'del(.statusLine)' "$CC_SETTINGS" > "$tmp" && mv "$tmp" "$CC_SETTINGS"
+  tmp=$(mktemp) && jq 'del(.statusLine, .["env"]["CLAUDE_CODE_SUBAGENT_MODEL"])' "$CC_SETTINGS" > "$tmp" && mv "$tmp" "$CC_SETTINGS"
 fi
 
 # --- Single-instance lock: remove a lock left by a PREVIOUS container ---
